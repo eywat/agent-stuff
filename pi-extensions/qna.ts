@@ -8,7 +8,7 @@
  */
 
 import { complete, type Model, type Api, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { BorderedLoader } from "@mariozechner/pi-coding-agent";
 
 const SYSTEM_PROMPT = `You are a question extractor. Given text from a conversation, extract any questions that need answering and format them for the user to fill in.
@@ -66,9 +66,7 @@ async function selectExtractionModel(
 }
 
 export default function (pi: ExtensionAPI) {
-	pi.registerCommand("qna", {
-		description: "Extract questions from last assistant message into editor",
-		handler: async (_args, ctx) => {
+	const qnaHandler = async (ctx: ExtensionContext) => {
 			if (!ctx.hasUI) {
 				ctx.ui.notify("qna requires interactive mode", "error");
 				return;
@@ -155,6 +153,15 @@ export default function (pi: ExtensionAPI) {
 
 			ctx.ui.setEditorText(result);
 			ctx.ui.notify("Questions loaded. Edit and submit when ready.", "info");
-		},
+	};
+
+	pi.registerCommand("qna", {
+		description: "Extract questions from last assistant message into editor",
+		handler: (_args, ctx) => qnaHandler(ctx),
+	});
+
+	pi.registerShortcut("ctrl+,", {
+		description: "Extract questions into editor",
+		handler: qnaHandler,
 	});
 }

@@ -39,6 +39,8 @@ All skill files are in the [`skills`](skills) folder:
 * [`/sentry`](skills/sentry) - Alternative way to access Sentry as a Claude Skill for reading issues
 * [`/improve-skill`](skills/improve-skill) - Claude Skill for analyzing coding agent sessions to improve or create new skills
 * [`/pi-share`](skills/pi-share) - Claude Skill for loading and parsing session transcripts from shittycodingagent.ai
+* [`/anachb`](skills/anachb) - Claude Skill for querying Austrian public transport (VOR AnachB) for departures, routes, and disruptions
+* [`/oebb-scotty`](skills/oebb-scotty) - Claude Skill for Austrian rail travel planning via ÖBB Scotty API
 
 ### Browser
 
@@ -63,6 +65,14 @@ In the [`skills/ghidra`](skills/ghidra) folder is a skill for automated reverse 
 ### pi-share
 
 In the [`skills/pi-share`](skills/pi-share) folder is a skill for loading and parsing session transcripts from shittycodingagent.ai (pi-share) URLs.  It fetches gists, decodes embedded session data, and extracts conversation history including messages, tool calls, and system prompts.
+
+### anachb
+
+In the [`skills/anachb`](skills/anachb) folder is a skill for querying Austrian public transport via the VOR AnachB API.  It includes shell scripts for searching stations, getting real-time departures, planning routes between locations, and checking service disruptions.  Covers all Austrian public transport including trains, U-Bahn, trams, and buses.
+
+### oebb-scotty
+
+In the [`skills/oebb-scotty`](skills/oebb-scotty) folder is a skill for Austrian rail travel planning via the ÖBB Scotty HAFAS API.  It documents how to search locations, plan trips between stations, get departure/arrival boards, and fetch service alerts.  Includes jq filters for extracting concise trip summaries from verbose API responses.
 
 ## PI Coding Agent Extensions
 

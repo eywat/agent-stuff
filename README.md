@@ -83,6 +83,7 @@ Custom extensions for the PI Coding Agent can be found in the [`pi-extensions`](
 * [`review.ts`](pi-extensions/review.ts) - Code review command inspired by Codex. Supports reviewing uncommitted changes, against a base branch (PR style), specific commits, or with custom instructions. Includes Ctrl+R shortcut.
 * [`loop.ts`](pi-extensions/loop.ts) - Runs a prompt loop for rapid iterative coding with optional auto-continue control.
 * [`reveal.ts`](pi-extensions/reveal.ts) - Finder/Quick Look helper that browses session file references via Ctrl+F or `/files`, with Ctrl+R revealing the latest file and Ctrl+Shift+R opening Quick Look on macOS.
+* [`codex-tuning.ts`](pi-extensions/codex-tuning.ts) - Codex tuning helper for collecting samples and tagging outcomes during agent sessions.
 
 ## PI Coding Agent Themes
 

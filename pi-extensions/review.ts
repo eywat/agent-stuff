@@ -70,6 +70,15 @@ Flag issues that:
 7. Write for quick comprehension without close reading.
 8. Avoid excessive flattery or unhelpful phrases like "Great job...".
 
+## Review priorities
+
+1. Call out newly added dependencies explicitly and explain why they're needed.
+2. Prefer simple, direct solutions over wrappers or abstractions without clear value.
+3. Favor fail-fast behavior; avoid logging-and-continue patterns that hide errors.
+4. Prefer predictable production behavior; crashing is better than silent degradation.
+5. Treat back pressure handling as critical to system stability.
+6. Apply system-level thinking; flag changes that increase operational risk or on-call wakeups.
+
 ## Priority levels
 
 Tag each finding with a priority level in the title:

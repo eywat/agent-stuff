@@ -1,6 +1,8 @@
 import type { ExtensionAPI, ExtensionContext, TurnEndEvent } from "@mariozechner/pi-coding-agent";
+import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { complete, type Model, type Api, type UserMessage } from "@mariozechner/pi-ai";
 import { StringEnum } from "@mariozechner/pi-ai";
+import { Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { promises as fs } from "node:fs";
 import * as net from "node:net";
@@ -904,6 +906,141 @@ Messages automatically include sender session info for replies.`,
 					details: { error: message },
 				};
 			}
+		},
+
+		renderCall(args, theme) {
+			const action = args.action ?? "send";
+			const sessionId = args.sessionId ?? "...";
+			const shortSessionId = sessionId.length > 12 ? sessionId.slice(0, 8) + "..." : sessionId;
+
+			// Build the header line
+			let header = theme.fg("toolTitle", theme.bold("→ session "));
+			header += theme.fg("accent", shortSessionId);
+
+			// Add action-specific info
+			if (action === "send") {
+				const mode = args.mode ?? "steer";
+				const wait = args.wait_until;
+				let info = theme.fg("muted", ` (${mode}`);
+				if (wait) info += theme.fg("dim", `, wait: ${wait}`);
+				info += theme.fg("muted", ")");
+				header += info;
+			} else {
+				header += theme.fg("muted", ` (${action})`);
+			}
+
+			// For send action, show the message
+			if (action === "send" && args.message) {
+				const msg = args.message;
+				const preview = msg.length > 80 ? msg.slice(0, 80) + "..." : msg;
+				// Handle multi-line messages
+				const firstLine = preview.split("\n")[0];
+				const hasMore = preview.includes("\n") || msg.length > 80;
+				return new Text(
+					header + "\n  " + theme.fg("dim", `"${firstLine}${hasMore ? "..." : ""}"`),
+					0,
+					0,
+				);
+			}
+
+			return new Text(header, 0, 0);
+		},
+
+		renderResult(result, { expanded }, theme) {
+			const details = result.details as Record<string, unknown> | undefined;
+			const isError = result.isError === true;
+
+			// Error case
+			if (isError || details?.error) {
+				const errorMsg = (details?.error as string) || result.content[0]?.type === "text" ? (result.content[0] as { type: "text"; text: string }).text : "Unknown error";
+				return new Text(theme.fg("error", "✗ ") + theme.fg("error", errorMsg), 0, 0);
+			}
+
+			// Detect action from details structure
+			const hasMessage = details && "message" in details && details.message;
+			const hasSummary = details && "summary" in details;
+			const hasCleared = details && "cleared" in details;
+			const hasTurnIndex = details && "turnIndex" in details;
+
+			// get_message or turn_end result with message
+			if (hasMessage) {
+				const message = details.message as ExtractedMessage;
+				const icon = theme.fg("success", "✓");
+
+				if (expanded) {
+					const container = new Container();
+					container.addChild(new Text(icon + theme.fg("muted", " Message received"), 0, 0));
+					container.addChild(new Spacer(1));
+					container.addChild(new Markdown(message.content, 0, 0, getMarkdownTheme()));
+					if (hasTurnIndex) {
+						container.addChild(new Spacer(1));
+						container.addChild(new Text(theme.fg("dim", `Turn #${details.turnIndex}`), 0, 0));
+					}
+					return container;
+				}
+
+				// Collapsed view - show preview
+				const preview = message.content.length > 200
+					? message.content.slice(0, 200) + "..."
+					: message.content;
+				const lines = preview.split("\n").slice(0, 5);
+				let text = icon + theme.fg("muted", " Message received");
+				if (hasTurnIndex) text += theme.fg("dim", ` (turn #${details.turnIndex})`);
+				text += "\n" + theme.fg("toolOutput", lines.join("\n"));
+				if (message.content.split("\n").length > 5 || message.content.length > 200) {
+					text += "\n" + theme.fg("dim", "(Ctrl+O to expand)");
+				}
+				return new Text(text, 0, 0);
+			}
+
+			// get_summary result
+			if (hasSummary) {
+				const summary = details.summary as string;
+				const model = details.model as string | undefined;
+				const icon = theme.fg("success", "✓");
+
+				if (expanded) {
+					const container = new Container();
+					let header = icon + theme.fg("muted", " Summary");
+					if (model) header += theme.fg("dim", ` via ${model}`);
+					container.addChild(new Text(header, 0, 0));
+					container.addChild(new Spacer(1));
+					container.addChild(new Markdown(summary, 0, 0, getMarkdownTheme()));
+					return container;
+				}
+
+				const preview = summary.length > 200 ? summary.slice(0, 200) + "..." : summary;
+				const lines = preview.split("\n").slice(0, 5);
+				let text = icon + theme.fg("muted", " Summary");
+				if (model) text += theme.fg("dim", ` via ${model}`);
+				text += "\n" + theme.fg("toolOutput", lines.join("\n"));
+				if (summary.split("\n").length > 5 || summary.length > 200) {
+					text += "\n" + theme.fg("dim", "(Ctrl+O to expand)");
+				}
+				return new Text(text, 0, 0);
+			}
+
+			// clear result
+			if (hasCleared) {
+				const alreadyAtRoot = details.alreadyAtRoot as boolean | undefined;
+				const icon = theme.fg("success", "✓");
+				const msg = alreadyAtRoot ? "Session already at root" : "Session cleared";
+				return new Text(icon + " " + theme.fg("muted", msg), 0, 0);
+			}
+
+			// send result (no wait or message_processed)
+			if (details && "delivered" in details) {
+				const mode = details.mode as string | undefined;
+				const icon = theme.fg("success", "✓");
+				let text = icon + theme.fg("muted", " Message delivered");
+				if (mode) text += theme.fg("dim", ` (${mode})`);
+				return new Text(text, 0, 0);
+			}
+
+			// Fallback - just show the text content
+			const text = result.content[0];
+			const content = text?.type === "text" ? text.text : "(no output)";
+			return new Text(theme.fg("success", "✓ ") + theme.fg("muted", content), 0, 0);
 		},
 	});
 }

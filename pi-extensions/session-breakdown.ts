@@ -4,13 +4,15 @@
  * Interactive TUI that analyzes ~/.pi/agent/sessions (recursively, *.jsonl) and shows
  * last 7/30/90 days of:
  * - sessions/day
+ * - messages/day
+ * - tokens/day (if available)
  * - cost/day (if available)
- * - model breakdown (sessions + cost)
+ * - model breakdown (sessions/messages/tokens + cost)
  *
  * Graph:
  * - GitHub-contributions-style calendar (weeks x weekdays)
- * - Hue: weighted mix of popular model colors (weighted by cost, or sessions if cost missing)
- * - Brightness: daily cost (log-scaled), with fallback to sessions/day if all costs are 0
+ * - Hue: weighted mix of popular model colors (weighted by the selected metric)
+ * - Brightness: selected metric per day (log-scaled)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
@@ -37,26 +39,38 @@ interface ParsedSession {
 	startedAt: Date;
 	dayKeyLocal: string; // YYYY-MM-DD (local)
 	modelsUsed: Set<ModelKey>;
+	messages: number;
+	tokens: number;
 	totalCost: number;
 	costByModel: Map<ModelKey, number>;
+	messagesByModel: Map<ModelKey, number>;
+	tokensByModel: Map<ModelKey, number>;
 }
 
 interface DayAgg {
 	date: Date; // local midnight
 	dayKeyLocal: string;
 	sessions: number;
+	messages: number;
+	tokens: number;
 	totalCost: number;
 	costByModel: Map<ModelKey, number>;
 	sessionsByModel: Map<ModelKey, number>;
+	messagesByModel: Map<ModelKey, number>;
+	tokensByModel: Map<ModelKey, number>;
 }
 
 interface RangeAgg {
 	days: DayAgg[];
 	dayByKey: Map<string, DayAgg>;
 	sessions: number;
+	totalMessages: number;
+	totalTokens: number;
 	totalCost: number;
 	modelCost: Map<ModelKey, number>;
 	modelSessions: Map<ModelKey, number>; // number of sessions where model was used
+	modelMessages: Map<ModelKey, number>;
+	modelTokens: Map<ModelKey, number>;
 }
 
 interface RGB {
@@ -77,6 +91,8 @@ interface BreakdownData {
 
 const SESSION_ROOT = path.join(os.homedir(), ".pi", "agent", "sessions");
 const RANGE_DAYS = [7, 30, 90] as const;
+
+type MeasurementMode = "sessions" | "messages" | "tokens";
 
 // Dark-ish background and empty cell color (close to GitHub dark)
 const DEFAULT_BG: RGB = { r: 13, g: 17, b: 23 };
@@ -137,6 +153,14 @@ function dim(text: string): string {
 
 function bold(text: string): string {
 	return `\x1b[1m${text}\x1b[0m`;
+}
+
+function formatCount(n: number): string {
+	if (!Number.isFinite(n) || n === 0) return "0";
+	if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1)}B`;
+	if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	if (n >= 10_000) return `${(n / 1_000).toFixed(1)}K`;
+	return n.toLocaleString("en-US");
 }
 
 function formatUsd(cost: number): string {
@@ -226,6 +250,56 @@ function extractCostTotal(usage: any): number {
 	return 0;
 }
 
+function extractTokensTotal(usage: any): number {
+	// Usage format varies across providers and pi versions.
+	// We try a few common shapes:
+	// - { totalTokens }
+	// - { total_tokens }
+	// - { promptTokens, completionTokens }
+	// - { prompt_tokens, completion_tokens }
+	// - { input_tokens, output_tokens }
+	// - { inputTokens, outputTokens }
+	// - { tokens: number | { total } }
+	if (!usage) return 0;
+
+	const readNum = (v: any): number => {
+		if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+		if (typeof v === "string") {
+			const n = Number(v);
+			return Number.isFinite(n) ? n : 0;
+		}
+		return 0;
+	};
+
+	let total = 0;
+	// direct totals
+	total =
+		readNum(usage?.totalTokens) ||
+		readNum(usage?.total_tokens) ||
+		readNum(usage?.tokens) ||
+		readNum(usage?.tokenCount) ||
+		readNum(usage?.token_count);
+	if (total > 0) return total;
+
+	// nested tokens object
+	total = readNum(usage?.tokens?.total) || readNum(usage?.tokens?.totalTokens) || readNum(usage?.tokens?.total_tokens);
+	if (total > 0) return total;
+
+	// sum of parts
+	const a =
+		readNum(usage?.promptTokens) ||
+		readNum(usage?.prompt_tokens) ||
+		readNum(usage?.inputTokens) ||
+		readNum(usage?.input_tokens);
+	const b =
+		readNum(usage?.completionTokens) ||
+		readNum(usage?.completion_tokens) ||
+		readNum(usage?.outputTokens) ||
+		readNum(usage?.output_tokens);
+	const sum = a + b;
+	return sum > 0 ? sum : 0;
+}
+
 async function walkSessionFiles(root: string, signal?: AbortSignal): Promise<string[]> {
 	const out: string[] = [];
 	const stack: string[] = [root];
@@ -258,8 +332,12 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 	let currentModel: ModelKey | null = null;
 
 	const modelsUsed = new Set<ModelKey>();
+	let messages = 0;
+	let tokens = 0;
 	let totalCost = 0;
 	const costByModel = new Map<ModelKey, number>();
+	const messagesByModel = new Map<ModelKey, number>();
+	const tokensByModel = new Map<ModelKey, number>();
 
 	const stream = createReadStream(filePath, { encoding: "utf8" });
 	const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
@@ -304,6 +382,15 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 				"unknown";
 			modelsUsed.add(mk);
 
+			messages += 1;
+			messagesByModel.set(mk, (messagesByModel.get(mk) ?? 0) + 1);
+
+			const tok = extractTokensTotal(usage);
+			if (tok > 0) {
+				tokens += tok;
+				tokensByModel.set(mk, (tokensByModel.get(mk) ?? 0) + tok);
+			}
+
 			const cost = extractCostTotal(usage);
 			if (cost > 0) {
 				totalCost += cost;
@@ -317,7 +404,18 @@ async function parseSessionFile(filePath: string, signal?: AbortSignal): Promise
 
 	if (!startedAt) return null;
 	const dayKeyLocal = toLocalDayKey(startedAt);
-	return { filePath, startedAt, dayKeyLocal, modelsUsed, totalCost, costByModel };
+	return {
+		filePath,
+		startedAt,
+		dayKeyLocal,
+		modelsUsed,
+		messages,
+		tokens,
+		totalCost,
+		costByModel,
+		messagesByModel,
+		tokensByModel,
+	};
 }
 
 function buildRangeAgg(days: number, now: Date): RangeAgg {
@@ -333,9 +431,13 @@ function buildRangeAgg(days: number, now: Date): RangeAgg {
 			date: d,
 			dayKeyLocal,
 			sessions: 0,
+			messages: 0,
+			tokens: 0,
 			totalCost: 0,
 			costByModel: new Map(),
 			sessionsByModel: new Map(),
+			messagesByModel: new Map(),
+			tokensByModel: new Map(),
 		};
 		outDays.push(day);
 		dayByKey.set(dayKeyLocal, day);
@@ -345,9 +447,13 @@ function buildRangeAgg(days: number, now: Date): RangeAgg {
 		days: outDays,
 		dayByKey,
 		sessions: 0,
+		totalMessages: 0,
+		totalTokens: 0,
 		totalCost: 0,
 		modelCost: new Map(),
 		modelSessions: new Map(),
+		modelMessages: new Map(),
+		modelTokens: new Map(),
 	};
 }
 
@@ -356,14 +462,30 @@ function addSessionToRange(range: RangeAgg, session: ParsedSession): void {
 	if (!day) return;
 
 	range.sessions += 1;
+	range.totalMessages += session.messages;
+	range.totalTokens += session.tokens;
 	range.totalCost += session.totalCost;
 	day.sessions += 1;
+	day.messages += session.messages;
+	day.tokens += session.tokens;
 	day.totalCost += session.totalCost;
 
 	// Sessions-per-model (presence)
 	for (const mk of session.modelsUsed) {
 		day.sessionsByModel.set(mk, (day.sessionsByModel.get(mk) ?? 0) + 1);
 		range.modelSessions.set(mk, (range.modelSessions.get(mk) ?? 0) + 1);
+	}
+
+	// Messages-per-model
+	for (const [mk, n] of session.messagesByModel.entries()) {
+		day.messagesByModel.set(mk, (day.messagesByModel.get(mk) ?? 0) + n);
+		range.modelMessages.set(mk, (range.modelMessages.get(mk) ?? 0) + n);
+	}
+
+	// Tokens-per-model
+	for (const [mk, n] of session.tokensByModel.entries()) {
+		day.tokensByModel.set(mk, (day.tokensByModel.get(mk) ?? 0) + n);
+		range.modelTokens.set(mk, (range.modelTokens.get(mk) ?? 0) + n);
 	}
 
 	// Cost-per-model
@@ -384,9 +506,16 @@ function choosePaletteFromLast30Days(range30: RangeAgg, topN = 4): {
 	otherColor: RGB;
 	orderedModels: ModelKey[];
 } {
-	// Prefer cost if any cost exists, else sessions.
+	// Prefer cost if any cost exists, else tokens, else messages, else sessions.
 	const costSum = [...range30.modelCost.values()].reduce((a, b) => a + b, 0);
-	const popularity = costSum > 0 ? range30.modelCost : range30.modelSessions;
+	const popularity =
+		costSum > 0
+			? range30.modelCost
+			: range30.totalTokens > 0
+				? range30.modelTokens
+				: range30.totalMessages > 0
+					? range30.modelMessages
+					: range30.modelSessions;
 
 	const sorted = sortMapByValueDesc(popularity);
 	const orderedModels = sorted.slice(0, topN).map((x) => x.key);
@@ -401,12 +530,23 @@ function choosePaletteFromLast30Days(range30: RangeAgg, topN = 4): {
 	};
 }
 
-function dayMixedColor(day: DayAgg, modelColors: Map<ModelKey, RGB>, otherColor: RGB): RGB {
+function dayMixedColor(
+	day: DayAgg,
+	modelColors: Map<ModelKey, RGB>,
+	otherColor: RGB,
+	mode: MeasurementMode,
+): RGB {
 	const parts: Array<{ color: RGB; weight: number }> = [];
 	let otherWeight = 0;
 
-	const useCost = day.totalCost > 0;
-	const map = useCost ? day.costByModel : day.sessionsByModel;
+	let map: Map<ModelKey, number>;
+	if (mode === "tokens") {
+		map = day.tokens > 0 ? day.tokensByModel : day.messages > 0 ? day.messagesByModel : day.sessionsByModel;
+	} else if (mode === "messages") {
+		map = day.messages > 0 ? day.messagesByModel : day.sessionsByModel;
+	} else {
+		map = day.sessionsByModel;
+	}
 
 	for (const [mk, w] of map.entries()) {
 		const c = modelColors.get(mk);
@@ -417,11 +557,24 @@ function dayMixedColor(day: DayAgg, modelColors: Map<ModelKey, RGB>, otherColor:
 	return weightedMix(parts);
 }
 
-function graphMetricForRange(range: RangeAgg): { kind: "cost" | "sessions"; max: number; denom: number } {
-	const maxCost = Math.max(0, ...range.days.map((d) => d.totalCost));
-	if (maxCost > 0) {
-		return { kind: "cost", max: maxCost, denom: Math.log1p(maxCost) };
+function graphMetricForRange(
+	range: RangeAgg,
+	mode: MeasurementMode,
+): { kind: "sessions" | "messages" | "tokens"; max: number; denom: number } {
+	if (mode === "tokens") {
+		const maxTokens = Math.max(0, ...range.days.map((d) => d.tokens));
+		if (maxTokens > 0) return { kind: "tokens", max: maxTokens, denom: Math.log1p(maxTokens) };
+		// fall back if tokens aren't available
+		mode = "messages";
 	}
+
+	if (mode === "messages") {
+		const maxMessages = Math.max(0, ...range.days.map((d) => d.messages));
+		if (maxMessages > 0) return { kind: "messages", max: maxMessages, denom: Math.log1p(maxMessages) };
+		// fall back if messages aren't available
+		mode = "sessions";
+	}
+
 	const maxSessions = Math.max(0, ...range.days.map((d) => d.sessions));
 	return { kind: "sessions", max: maxSessions, denom: Math.log1p(maxSessions) };
 }
@@ -440,6 +593,7 @@ function renderGraphLines(
 	range: RangeAgg,
 	modelColors: Map<ModelKey, RGB>,
 	otherColor: RGB,
+	mode: MeasurementMode,
 	options?: { cellWidth?: number; gap?: number },
 ): string[] {
 	const days = range.days;
@@ -456,7 +610,7 @@ function renderGraphLines(
 	const block = "█".repeat(cellWidth);
 	const gapStr = " ".repeat(gap);
 
-	const metric = graphMetricForRange(range);
+	const metric = graphMetricForRange(range, mode);
 	const denom = metric.denom;
 
 	// Label only Mon/Wed/Fri like GitHub (saves space)
@@ -482,14 +636,19 @@ function renderGraphLines(
 
 			const key = toLocalDayKey(cellDate);
 			const day = range.dayByKey.get(key);
-			const value = metric.kind === "cost" ? (day?.totalCost ?? 0) : (day?.sessions ?? 0);
+			const value =
+				metric.kind === "tokens"
+					? (day?.tokens ?? 0)
+					: metric.kind === "messages"
+						? (day?.messages ?? 0)
+						: (day?.sessions ?? 0);
 
 			if (!day || value <= 0) {
 				line += ansiFg(EMPTY_CELL_BG, block) + colGap;
 				continue;
 			}
 
-			const hue = dayMixedColor(day, modelColors, otherColor);
+			const hue = dayMixedColor(day, modelColors, otherColor, mode);
 			let t = denom > 0 ? Math.log1p(value) / denom : 0;
 			t = clamp01(t);
 			const minVisible = 0.2;
@@ -554,30 +713,42 @@ function renderLegendBlock(leftLabel: string, items: string[], width: number): s
 	return lines;
 }
 
-function renderModelTable(range: RangeAgg, maxRows = 8): string[] {
-	// Prefer cost sorting if any cost exists, else sessions.
-	const totalCost = range.totalCost;
-	const costExists = totalCost > 0;
+function renderModelTable(range: RangeAgg, mode: MeasurementMode, maxRows = 8): string[] {
+	// Keep this relatively narrow: model + selected metric + cost + share.
+	const metric = graphMetricForRange(range, mode);
+	const kind = metric.kind;
 
-	const sortMap = costExists ? range.modelCost : range.modelSessions;
-	const sorted = sortMapByValueDesc(sortMap);
+	let perModel: Map<ModelKey, number>;
+	let total = 0;
+	let label = kind;
+
+	if (kind === "tokens") {
+		perModel = range.modelTokens;
+		total = range.totalTokens;
+	} else if (kind === "messages") {
+		perModel = range.modelMessages;
+		total = range.totalMessages;
+	} else {
+		perModel = range.modelSessions;
+		total = range.sessions;
+	}
+
+	const sorted = sortMapByValueDesc(perModel);
 	const rows = sorted.slice(0, maxRows);
 
+	const valueWidth = kind === "tokens" ? 10 : 8;
 	const modelWidth = Math.min(52, Math.max("model".length, ...rows.map((r) => r.key.length)));
+
 	const lines: string[] = [];
-	lines.push(
-		`${padRight("model", modelWidth)}  ${padLeft("sessions", 8)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`,
-	);
-	lines.push(`${"-".repeat(modelWidth)}  ${"-".repeat(8)}  ${"-".repeat(10)}  ${"-".repeat(6)}`);
+	lines.push(`${padRight("model", modelWidth)}  ${padLeft(label, valueWidth)}  ${padLeft("cost", 10)}  ${padLeft("share", 6)}`);
+	lines.push(`${"-".repeat(modelWidth)}  ${"-".repeat(valueWidth)}  ${"-".repeat(10)}  ${"-".repeat(6)}`);
 
 	for (const r of rows) {
-		const sessions = range.modelSessions.get(r.key) ?? 0;
+		const value = perModel.get(r.key) ?? 0;
 		const cost = range.modelCost.get(r.key) ?? 0;
-		const share = costExists
-			? `${Math.round((cost / totalCost) * 100)}%`
-			: `${Math.round((sessions / Math.max(1, range.sessions)) * 100)}%`;
+		const share = total > 0 ? `${Math.round((value / total) * 100)}%` : "0%";
 		lines.push(
-			`${padRight(r.key.slice(0, modelWidth), modelWidth)}  ${padLeft(String(sessions), 8)}  ${padLeft(formatUsd(cost), 10)}  ${padLeft(share, 6)}`,
+			`${padRight(r.key.slice(0, modelWidth), modelWidth)}  ${padLeft(formatCount(value), valueWidth)}  ${padLeft(formatUsd(cost), 10)}  ${padLeft(share, 6)}`,
 		);
 	}
 
@@ -604,10 +775,17 @@ function renderLeftRight(left: string, right: string, width: number): string {
 	return left + " ".repeat(pad) + rightText;
 }
 
-function rangeSummary(range: RangeAgg, days: number): string {
+function rangeSummary(range: RangeAgg, days: number, mode: MeasurementMode): string {
 	const avg = range.sessions > 0 ? range.totalCost / range.sessions : 0;
 	const costPart = range.totalCost > 0 ? `${formatUsd(range.totalCost)} · avg ${formatUsd(avg)}/session` : `$0.0000`;
-	return `Last ${days} days: ${range.sessions} sessions · ${costPart}`;
+
+	if (mode === "tokens") {
+		return `Last ${days} days: ${formatCount(range.sessions)} sessions · ${formatCount(range.totalTokens)} tokens · ${costPart}`;
+	}
+	if (mode === "messages") {
+		return `Last ${days} days: ${formatCount(range.sessions)} sessions · ${formatCount(range.totalMessages)} messages · ${costPart}`;
+	}
+	return `Last ${days} days: ${formatCount(range.sessions)} sessions · ${costPart}`;
 }
 
 async function computeBreakdown(signal?: AbortSignal): Promise<BreakdownData> {
@@ -663,6 +841,7 @@ class BreakdownComponent implements Component {
 	private tui: TUI;
 	private onDone: () => void;
 	private rangeIndex = 1; // default 30d
+	private measurement: MeasurementMode = "sessions";
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
@@ -680,6 +859,16 @@ class BreakdownComponent implements Component {
 	handleInput(data: string): void {
 		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c")) || data.toLowerCase() === "q") {
 			this.onDone();
+			return;
+		}
+
+		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab")) || data.toLowerCase() === "t") {
+			const order: MeasurementMode[] = ["sessions", "messages", "tokens"];
+			const idx = Math.max(0, order.indexOf(this.measurement));
+			const dir = matchesKey(data, Key.shift("tab")) ? -1 : 1;
+			this.measurement = order[(idx + order.length + dir) % order.length] ?? "sessions";
+			this.invalidate();
+			this.tui.requestRender();
 			return;
 		}
 
@@ -719,7 +908,7 @@ class BreakdownComponent implements Component {
 
 		const selectedDays = RANGE_DAYS[this.rangeIndex];
 		const range = this.data.ranges.get(selectedDays)!;
-		const metric = graphMetricForRange(range);
+		const metric = graphMetricForRange(range, this.measurement);
 
 		const tab = (days: number, idx: number): string => {
 			const selected = idx === this.rangeIndex;
@@ -727,7 +916,14 @@ class BreakdownComponent implements Component {
 			return selected ? bold(`[${label}]`) : dim(` ${label} `);
 		};
 
-		const header = `${bold("Session breakdown")}  ${tab(7, 0)} ${tab(30, 1)} ${tab(90, 2)}  ${dim("←/→ to switch · q to close")}`;
+		const metricTab = (mode: MeasurementMode, label: string): string => {
+			const selected = mode === this.measurement;
+			return selected ? bold(`[${label}]`) : dim(` ${label} `);
+		};
+
+		const header =
+			`${bold("Session breakdown")}  ${tab(7, 0)} ${tab(30, 1)} ${tab(90, 2)}  ` +
+			`${metricTab("sessions", "sess")} ${metricTab("messages", "msg")} ${metricTab("tokens", "tok")}`;
 
 		const legendItems = renderLegendItems(
 			this.data.palette.modelColors,
@@ -735,7 +931,7 @@ class BreakdownComponent implements Component {
 			this.data.palette.otherColor,
 		);
 
-		const summary = rangeSummary(range, selectedDays) + dim(`   (graph: ${metric.kind}/day)`);
+		const summary = rangeSummary(range, selectedDays, metric.kind) + dim(`   (graph: ${metric.kind}/day)`);
 
 		const maxScale = selectedDays === 7 ? 4 : selectedDays === 30 ? 3 : 2;
 		const weeks = weeksForRange(range);
@@ -746,12 +942,18 @@ class BreakdownComponent implements Component {
 		const idealCellWidth = Math.floor((graphArea + gap) / Math.max(1, weeks)) - gap;
 		const cellWidth = Math.min(maxScale, Math.max(1, idealCellWidth));
 
-		const graphLines = renderGraphLines(range, this.data.palette.modelColors, this.data.palette.otherColor, { cellWidth, gap });
-		const tableLines = renderModelTable(range, 8);
+		const graphLines = renderGraphLines(
+			range,
+			this.data.palette.modelColors,
+			this.data.palette.otherColor,
+			this.measurement,
+			{ cellWidth, gap },
+		);
+		const tableLines = renderModelTable(range, metric.kind, 8);
 
 		const lines: string[] = [];
 		lines.push(truncateToWidth(header, width));
-		lines.push(truncateToWidth(dim(`Sessions directory: ${SESSION_ROOT}`), width));
+		lines.push(truncateToWidth(dim("←/→ range · tab metric · q to close"), width));
 		lines.push("");
 		lines.push(truncateToWidth(summary, width));
 		lines.push("");
@@ -806,7 +1008,7 @@ class BreakdownComponent implements Component {
 
 export default function sessionBreakdownExtension(pi: ExtensionAPI) {
 	pi.registerCommand("session-breakdown", {
-		description: "Interactive breakdown of last 7/30/90 days of ~/.pi session usage (sessions + cost by model)",
+		description: "Interactive breakdown of last 7/30/90 days of ~/.pi session usage (sessions/messages/tokens + cost by model)",
 		handler: async (_args, ctx: ExtensionContext) => {
 			if (!ctx.hasUI) {
 				// Non-interactive fallback: just notify.
@@ -815,7 +1017,7 @@ export default function sessionBreakdownExtension(pi: ExtensionAPI) {
 				pi.sendMessage(
 					{
 						customType: "session-breakdown",
-						content: `Session breakdown (non-interactive)\n${rangeSummary(range, 30)}`,
+						content: `Session breakdown (non-interactive)\n${rangeSummary(range, 30, "sessions")}`,
 						display: true,
 					},
 					{ triggerTurn: false },

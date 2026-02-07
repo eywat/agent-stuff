@@ -5,7 +5,10 @@
  *
  * File format in .pi/todos:
  * - The file starts with a JSON object (not YAML) containing the front matter:
- *   { id, title, tags, status, created_at, assigned_to_session }
+ *   { id, title, tags, status, created_at, assigned_to_session, post? }
+ * - post is optional for backwards compatibility with older todo files.
+ * - If present, post is a list of direct dependency todo ids that must be done first.
+ * - Avoid transitive dependencies in post (only list direct blockers).
  * - After the JSON block comes optional markdown body text separated by a blank line.
  * - Example:
  *   {
@@ -14,7 +17,8 @@
  *     "tags": ["qa"],
  *     "status": "open",
  *     "created_at": "2026-01-25T17:00:00.000Z",
- *     "assigned_to_session": "session.json"
+ *     "assigned_to_session": "session.json",
+ *     "post": ["a1b2c3d4"]
  *   }
  *
  *   Notes about the work go here.
@@ -72,6 +76,7 @@ interface TodoFrontMatter {
 	status: string;
 	created_at: string;
 	assigned_to_session?: string;
+	post?: string[];
 }
 
 interface TodoRecord extends TodoFrontMatter {
@@ -108,6 +113,14 @@ const TodoParams = Type.Object({
 	title: Type.Optional(Type.String({ description: "Short summary shown in lists" })),
 	status: Type.Optional(Type.String({ description: "Todo status" })),
 	tags: Type.Optional(Type.Array(Type.String({ description: "Todo tag" }))),
+	depends: Type.Optional(
+		Type.Array(
+			Type.String({
+				description:
+					"Direct dependency todo ids (TODO-<hex> or raw hex) that must be completed first. Only include direct blockers; avoid transitive dependencies.",
+			}),
+		),
+	),
 	body: Type.Optional(
 		Type.String({ description: "Long-form details (markdown). Update replaces; append adds." }),
 	),
@@ -139,7 +152,13 @@ type TodoMenuAction =
 	| "view";
 
 type TodoToolDetails =
-	| { action: "list" | "list-all"; todos: TodoFrontMatter[]; currentSessionId?: string; error?: string }
+	| {
+			action: "list" | "list-all";
+			todos: TodoFrontMatter[];
+			dependencyStatusById?: Record<string, string>;
+			currentSessionId?: string;
+			error?: string;
+		}
 	| {
 			action: "get" | "create" | "update" | "append" | "delete" | "claim" | "release";
 			todo: TodoRecord;
@@ -173,6 +192,41 @@ function displayTodoId(id: string): string {
 	return formatTodoId(normalizeTodoId(id));
 }
 
+function normalizeTodoDependencies(depends: unknown, selfId?: string): string[] {
+	if (!Array.isArray(depends)) return [];
+
+	const normalizedSelfId = selfId ? normalizeTodoId(selfId).toLowerCase() : "";
+	const seen = new Set<string>();
+	const normalized: string[] = [];
+
+	for (const dependency of depends) {
+		if (typeof dependency !== "string") continue;
+		const validated = validateTodoId(dependency);
+		if ("error" in validated) continue;
+		const normalizedId = validated.id;
+		if (normalizedSelfId && normalizedId === normalizedSelfId) continue;
+		if (seen.has(normalizedId)) continue;
+		seen.add(normalizedId);
+		normalized.push(normalizedId);
+	}
+
+	return normalized;
+}
+
+function normalizeTodoPostSection(post: unknown, selfId?: string): string[] | undefined {
+	if (Array.isArray(post)) {
+		const depends = normalizeTodoDependencies(post, selfId);
+		return depends.length ? depends : undefined;
+	}
+
+	if (!post || typeof post !== "object") return undefined;
+
+	// Backwards compatibility for earlier experimental shape: { depends: [...] }
+	const data = post as { depends?: unknown };
+	const depends = normalizeTodoDependencies(data.depends, selfId);
+	return depends.length ? depends : undefined;
+}
+
 function isTodoClosed(status: string): boolean {
 	return ["closed", "done"].includes(status.toLowerCase());
 }
@@ -183,22 +237,116 @@ function clearAssignmentIfClosed(todo: TodoFrontMatter): void {
 	}
 }
 
-function sortTodos(todos: TodoFrontMatter[]): TodoFrontMatter[] {
-	return [...todos].sort((a, b) => {
-		const aClosed = isTodoClosed(a.status);
-		const bClosed = isTodoClosed(b.status);
-		if (aClosed !== bClosed) return aClosed ? 1 : -1;
-		const aAssigned = !aClosed && Boolean(a.assigned_to_session);
-		const bAssigned = !bClosed && Boolean(b.assigned_to_session);
-		if (aAssigned !== bAssigned) return aAssigned ? -1 : 1;
-		return (a.created_at || "").localeCompare(b.created_at || "");
+function buildTodoStatusById(todos: TodoFrontMatter[]): Map<string, string> {
+	const statusById = new Map<string, string>();
+	for (const todo of todos) {
+		statusById.set(todo.id, getTodoStatus(todo));
+	}
+	return statusById;
+}
+
+function getVisibleTodoDependencies(todo: TodoFrontMatter, statusById: Map<string, string>): string[] {
+	const dependencies = normalizeTodoPostSection(todo.post, todo.id) ?? [];
+	return dependencies.filter((dependencyId) => {
+		const dependencyStatus = statusById.get(dependencyId);
+		if (!dependencyStatus) return true;
+		return !isTodoClosed(dependencyStatus);
 	});
+}
+
+function compareTodosByCreatedAt(a: TodoFrontMatter, b: TodoFrontMatter): number {
+	const createdComparison = (a.created_at || "").localeCompare(b.created_at || "");
+	if (createdComparison !== 0) return createdComparison;
+	return a.id.localeCompare(b.id);
+}
+
+function sortTodosByDependency(
+	todos: TodoFrontMatter[],
+	statusById: Map<string, string>,
+	compare: (a: TodoFrontMatter, b: TodoFrontMatter) => number = compareTodosByCreatedAt,
+): TodoFrontMatter[] {
+	if (todos.length <= 1) return [...todos];
+
+	const byId = new Map<string, TodoFrontMatter>();
+	const incomingById = new Map<string, Set<string>>();
+	const outgoingById = new Map<string, Set<string>>();
+
+	for (const todo of todos) {
+		byId.set(todo.id, todo);
+		incomingById.set(todo.id, new Set<string>());
+		outgoingById.set(todo.id, new Set<string>());
+	}
+
+	for (const todo of todos) {
+		const dependencies = getVisibleTodoDependencies(todo, statusById).filter(
+			(dependencyId) => dependencyId !== todo.id && byId.has(dependencyId),
+		);
+		for (const dependencyId of dependencies) {
+			incomingById.get(todo.id)?.add(dependencyId);
+			outgoingById.get(dependencyId)?.add(todo.id);
+		}
+	}
+
+	const ready = todos
+		.filter((todo) => (incomingById.get(todo.id)?.size ?? 0) === 0)
+		.sort(compare);
+	const ordered: TodoFrontMatter[] = [];
+	const emitted = new Set<string>();
+
+	while (ready.length) {
+		const next = ready.shift();
+		if (!next || emitted.has(next.id)) continue;
+		emitted.add(next.id);
+		ordered.push(next);
+
+		const dependents = [...(outgoingById.get(next.id) ?? [])]
+			.map((dependentId) => byId.get(dependentId))
+			.filter((todo): todo is TodoFrontMatter => Boolean(todo))
+			.sort(compare);
+
+		for (const dependent of dependents) {
+			const incoming = incomingById.get(dependent.id);
+			if (!incoming) continue;
+			incoming.delete(next.id);
+			if (incoming.size === 0 && !emitted.has(dependent.id) && !ready.some((todo) => todo.id === dependent.id)) {
+				ready.push(dependent);
+			}
+		}
+		ready.sort(compare);
+	}
+
+	if (ordered.length === todos.length) return ordered;
+
+	const remaining = todos
+		.filter((todo) => !emitted.has(todo.id))
+		.sort(compare);
+	return [...ordered, ...remaining];
+}
+
+function sortTodos(todos: TodoFrontMatter[]): TodoFrontMatter[] {
+	const statusById = buildTodoStatusById(todos);
+	const openTodos = todos.filter((todo) => !isTodoClosed(getTodoStatus(todo)));
+	const closedTodos = todos.filter((todo) => isTodoClosed(getTodoStatus(todo)));
+
+	const compareOpenTodos = (a: TodoFrontMatter, b: TodoFrontMatter) => {
+		const aAssigned = Boolean(a.assigned_to_session);
+		const bAssigned = Boolean(b.assigned_to_session);
+		if (aAssigned !== bAssigned) return aAssigned ? -1 : 1;
+		return compareTodosByCreatedAt(a, b);
+	};
+
+	const sortedOpen = sortTodosByDependency(openTodos.sort(compareOpenTodos), statusById, compareOpenTodos);
+	const sortedClosed = sortTodosByDependency(closedTodos.sort(compareTodosByCreatedAt), statusById);
+	return [...sortedOpen, ...sortedClosed];
 }
 
 function buildTodoSearchText(todo: TodoFrontMatter): string {
 	const tags = todo.tags.join(" ");
 	const assignment = todo.assigned_to_session ? `assigned:${todo.assigned_to_session}` : "";
-	return `${formatTodoId(todo.id)} ${todo.id} ${todo.title} ${tags} ${todo.status} ${assignment}`.trim();
+	const dependencies = (normalizeTodoPostSection(todo.post, todo.id) ?? [])
+		.map((dependencyId) => `${dependencyId} ${formatTodoId(dependencyId)}`)
+		.join(" ");
+	return `${formatTodoId(todo.id)} ${todo.id} ${todo.title} ${tags} ${todo.status} ${assignment} ${dependencies}`.trim();
 }
 
 function filterTodos(todos: TodoFrontMatter[], query: string): TodoFrontMatter[] {
@@ -211,6 +359,11 @@ function filterTodos(todos: TodoFrontMatter[], query: string): TodoFrontMatter[]
 		.filter(Boolean);
 
 	if (tokens.length === 0) return todos;
+
+	const dependencyOrder = new Map<string, number>();
+	sortTodos(todos).forEach((todo, index) => {
+		dependencyOrder.set(todo.id, index);
+	});
 
 	const matches: Array<{ todo: TodoFrontMatter; score: number }> = [];
 	for (const todo of todos) {
@@ -238,7 +391,8 @@ function filterTodos(todos: TodoFrontMatter[], query: string): TodoFrontMatter[]
 			const aAssigned = !aClosed && Boolean(a.todo.assigned_to_session);
 			const bAssigned = !bClosed && Boolean(b.todo.assigned_to_session);
 			if (aAssigned !== bAssigned) return aAssigned ? -1 : 1;
-			return a.score - b.score;
+			if (a.score !== b.score) return a.score - b.score;
+			return (dependencyOrder.get(a.todo.id) ?? 0) - (dependencyOrder.get(b.todo.id) ?? 0);
 		})
 		.map((match) => match.todo);
 }
@@ -364,6 +518,7 @@ class TodoSelectorComponent extends Container implements Focusable {
 			Math.min(this.selectedIndex - Math.floor(maxVisible / 2), this.filteredTodos.length - maxVisible),
 		);
 		const endIndex = Math.min(startIndex + maxVisible, this.filteredTodos.length);
+		const statusById = buildTodoStatusById(this.allTodos);
 
 		for (let i = startIndex; i < endIndex; i += 1) {
 			const todo = this.filteredTodos[i];
@@ -374,6 +529,7 @@ class TodoSelectorComponent extends Container implements Focusable {
 			const titleColor = isSelected ? "accent" : closed ? "dim" : "text";
 			const statusColor = closed ? "dim" : "success";
 			const tagText = todo.tags.length ? ` [${todo.tags.join(", ")}]` : "";
+			const dependencyText = renderDependencySuffix(this.theme, todo, statusById);
 			const assignmentText = renderAssignmentSuffix(this.theme, todo, this.currentSessionId);
 			const line =
 				prefix +
@@ -381,6 +537,7 @@ class TodoSelectorComponent extends Container implements Focusable {
 				" " +
 				this.theme.fg(titleColor, todo.title || "(untitled)") +
 				this.theme.fg("muted", tagText) +
+				dependencyText +
 				assignmentText +
 				" " +
 				this.theme.fg(statusColor, `(${todo.status || "open"})`);
@@ -673,12 +830,18 @@ class TodoDetailOverlayComponent {
 		const status = this.todo.status || "open";
 		const statusColor = isTodoClosed(status) ? "dim" : "success";
 		const tagText = this.todo.tags.length ? this.todo.tags.join(", ") : "no tags";
+		const dependencyText = (normalizeTodoPostSection(this.todo.post, this.todo.id) ?? [])
+			.map((dependencyId) => formatTodoId(dependencyId))
+			.join(", ");
+		const dependencySegment = dependencyText ? `depends: ${dependencyText}` : "no dependencies";
 		const line =
 			this.theme.fg("accent", formatTodoId(this.todo.id)) +
 			this.theme.fg("muted", " • ") +
 			this.theme.fg(statusColor, status) +
 			this.theme.fg("muted", " • ") +
-			this.theme.fg("muted", tagText);
+			this.theme.fg("muted", tagText) +
+			this.theme.fg("muted", " • ") +
+			this.theme.fg("warning", dependencySegment);
 		return truncateToWidth(line, width);
 	}
 
@@ -797,13 +960,14 @@ function parseFrontMatter(text: string, idFallback: string): TodoFrontMatter {
 		status: "open",
 		created_at: "",
 		assigned_to_session: undefined,
+		post: undefined,
 	};
 
 	const trimmed = text.trim();
 	if (!trimmed) return data;
 
 	try {
-		const parsed = JSON.parse(trimmed) as Partial<TodoFrontMatter> | null;
+		const parsed = JSON.parse(trimmed) as (Partial<TodoFrontMatter> & { post?: unknown }) | null;
 		if (!parsed || typeof parsed !== "object") return data;
 		if (typeof parsed.id === "string" && parsed.id) data.id = parsed.id;
 		if (typeof parsed.title === "string") data.title = parsed.title;
@@ -815,6 +979,7 @@ function parseFrontMatter(text: string, idFallback: string): TodoFrontMatter {
 		if (Array.isArray(parsed.tags)) {
 			data.tags = parsed.tags.filter((tag): tag is string => typeof tag === "string");
 		}
+		data.post = normalizeTodoPostSection(parsed.post, data.id);
 	} catch {
 		return data;
 	}
@@ -889,11 +1054,13 @@ function parseTodoContent(content: string, idFallback: string): TodoRecord {
 		status: parsed.status,
 		created_at: parsed.created_at,
 		assigned_to_session: parsed.assigned_to_session,
+		post: normalizeTodoPostSection(parsed.post, idFallback),
 		body: body ?? "",
 	};
 }
 
 function serializeTodo(todo: TodoRecord): string {
+	const normalizedPost = normalizeTodoPostSection(todo.post, todo.id);
 	const frontMatter = JSON.stringify(
 		{
 			id: todo.id,
@@ -902,6 +1069,7 @@ function serializeTodo(todo: TodoRecord): string {
 			status: todo.status,
 			created_at: todo.created_at,
 			assigned_to_session: todo.assigned_to_session || undefined,
+			...(normalizedPost ? { post: normalizedPost } : {}),
 		},
 		null,
 		2,
@@ -1038,6 +1206,7 @@ async function listTodos(todosDir: string): Promise<TodoFrontMatter[]> {
 				status: parsed.status,
 				created_at: parsed.created_at,
 				assigned_to_session: parsed.assigned_to_session,
+				post: normalizeTodoPostSection(parsed.post, id),
 			});
 		} catch {
 			// ignore unreadable todo
@@ -1071,6 +1240,7 @@ function listTodosSync(todosDir: string): TodoFrontMatter[] {
 				status: parsed.status,
 				created_at: parsed.created_at,
 				assigned_to_session: parsed.assigned_to_session,
+				post: normalizeTodoPostSection(parsed.post, id),
 			});
 		} catch {
 			// ignore
@@ -1092,6 +1262,13 @@ function formatAssignmentSuffix(todo: TodoFrontMatter): string {
 	return todo.assigned_to_session ? ` (assigned: ${todo.assigned_to_session})` : "";
 }
 
+function formatDependencySuffix(todo: TodoFrontMatter, statusById: Map<string, string>): string {
+	const visibleDependencies = getVisibleTodoDependencies(todo, statusById);
+	if (!visibleDependencies.length) return "";
+	const dependencyText = visibleDependencies.map((dependencyId) => formatTodoId(dependencyId)).join(", ");
+	return ` (depends: ${dependencyText})`;
+}
+
 function renderAssignmentSuffix(
 	theme: Theme,
 	todo: TodoFrontMatter,
@@ -1104,9 +1281,21 @@ function renderAssignmentSuffix(
 	return theme.fg(color, ` (assigned: ${todo.assigned_to_session}${suffix})`);
 }
 
-function formatTodoHeading(todo: TodoFrontMatter): string {
+function renderDependencySuffix(
+	theme: Theme,
+	todo: TodoFrontMatter,
+	statusById: Map<string, string>,
+): string {
+	const visibleDependencies = getVisibleTodoDependencies(todo, statusById);
+	if (!visibleDependencies.length) return "";
+	const dependencyText = visibleDependencies.map((dependencyId) => formatTodoId(dependencyId)).join(", ");
+	return theme.fg("warning", ` (depends: ${dependencyText})`);
+}
+
+function formatTodoHeading(todo: TodoFrontMatter, statusById: Map<string, string>): string {
 	const tagText = todo.tags.length ? ` [${todo.tags.join(", ")}]` : "";
-	return `${formatTodoId(todo.id)} ${getTodoTitle(todo)}${tagText}${formatAssignmentSuffix(todo)}`;
+	const dependencyText = formatDependencySuffix(todo, statusById);
+	return `${formatTodoId(todo.id)} ${getTodoTitle(todo)}${tagText}${dependencyText}${formatAssignmentSuffix(todo)}`;
 }
 
 function buildRefinePrompt(todoId: string, title: string): string {
@@ -1142,6 +1331,7 @@ function splitTodosByAssignment(todos: TodoFrontMatter[]): {
 function formatTodoList(todos: TodoFrontMatter[]): string {
 	if (!todos.length) return "No todos.";
 
+	const statusById = buildTodoStatusById(todos);
 	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
 	const lines: string[] = [];
 	const pushSection = (label: string, sectionTodos: TodoFrontMatter[]) => {
@@ -1151,7 +1341,7 @@ function formatTodoList(todos: TodoFrontMatter[]): string {
 			return;
 		}
 		for (const todo of sectionTodos) {
-			lines.push(`  ${formatTodoHeading(todo)}`);
+			lines.push(`  ${formatTodoHeading(todo, statusById)}`);
 		}
 	};
 
@@ -1162,13 +1352,35 @@ function formatTodoList(todos: TodoFrontMatter[]): string {
 }
 
 function serializeTodoForAgent(todo: TodoRecord): string {
-	const payload = { ...todo, id: formatTodoId(todo.id) };
+	const depends = (normalizeTodoPostSection(todo.post, todo.id) ?? []).map((dependencyId) =>
+		formatTodoId(dependencyId),
+	);
+	const payload = {
+		...todo,
+		id: formatTodoId(todo.id),
+		...(depends.length ? { post: depends } : {}),
+	};
 	return JSON.stringify(payload, null, 2);
 }
 
-function serializeTodoListForAgent(todos: TodoFrontMatter[]): string {
+function serializeTodoListForAgent(
+	todos: TodoFrontMatter[],
+	dependencyStatusById?: Record<string, string>,
+): string {
+	const statusById = dependencyStatusById
+		? new Map<string, string>(Object.entries(dependencyStatusById))
+		: buildTodoStatusById(todos);
 	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
-	const mapTodo = (todo: TodoFrontMatter) => ({ ...todo, id: formatTodoId(todo.id) });
+	const mapTodo = (todo: TodoFrontMatter) => {
+		const depends = getVisibleTodoDependencies(todo, statusById).map((dependencyId) =>
+			formatTodoId(dependencyId),
+		);
+		return {
+			...todo,
+			id: formatTodoId(todo.id),
+			...(depends.length ? { post: depends } : {}),
+		};
+	};
 	return JSON.stringify(
 		{
 			assigned: assignedTodos.map(mapTodo),
@@ -1180,16 +1392,23 @@ function serializeTodoListForAgent(todos: TodoFrontMatter[]): string {
 	);
 }
 
-function renderTodoHeading(theme: Theme, todo: TodoFrontMatter, currentSessionId?: string): string {
+function renderTodoHeading(
+	theme: Theme,
+	todo: TodoFrontMatter,
+	statusById: Map<string, string>,
+	currentSessionId?: string,
+): string {
 	const closed = isTodoClosed(getTodoStatus(todo));
 	const titleColor = closed ? "dim" : "text";
 	const tagText = todo.tags.length ? theme.fg("dim", ` [${todo.tags.join(", ")}]`) : "";
+	const dependencyText = renderDependencySuffix(theme, todo, statusById);
 	const assignmentText = renderAssignmentSuffix(theme, todo, currentSessionId);
 	return (
 		theme.fg("accent", formatTodoId(todo.id)) +
 		" " +
 		theme.fg(titleColor, getTodoTitle(todo)) +
 		tagText +
+		dependencyText +
 		assignmentText
 	);
 }
@@ -1199,9 +1418,13 @@ function renderTodoList(
 	todos: TodoFrontMatter[],
 	expanded: boolean,
 	currentSessionId?: string,
+	dependencyStatusById?: Record<string, string>,
 ): string {
 	if (!todos.length) return theme.fg("dim", "No todos");
 
+	const statusById = dependencyStatusById
+		? new Map<string, string>(Object.entries(dependencyStatusById))
+		: buildTodoStatusById(todos);
 	const { assignedTodos, openTodos, closedTodos } = splitTodosByAssignment(todos);
 	const lines: string[] = [];
 	const pushSection = (label: string, sectionTodos: TodoFrontMatter[]) => {
@@ -1212,7 +1435,7 @@ function renderTodoList(
 		}
 		const maxItems = expanded ? sectionTodos.length : Math.min(sectionTodos.length, 3);
 		for (let i = 0; i < maxItems; i++) {
-			lines.push(`  ${renderTodoHeading(theme, sectionTodos[i], currentSessionId)}`);
+			lines.push(`  ${renderTodoHeading(theme, sectionTodos[i], statusById, currentSessionId)}`);
 		}
 		if (!expanded && sectionTodos.length > maxItems) {
 			lines.push(theme.fg("dim", `  ... ${sectionTodos.length - maxItems} more`));
@@ -1234,10 +1457,14 @@ function renderTodoList(
 }
 
 function renderTodoDetail(theme: Theme, todo: TodoRecord, expanded: boolean): string {
-	const summary = renderTodoHeading(theme, todo);
+	const statusById = new Map<string, string>([[todo.id, getTodoStatus(todo)]]);
+	const summary = renderTodoHeading(theme, todo, statusById);
 	if (!expanded) return summary;
 
 	const tags = todo.tags.length ? todo.tags.join(", ") : "none";
+	const dependencies = getVisibleTodoDependencies(todo, statusById)
+		.map((dependencyId) => formatTodoId(dependencyId))
+		.join(", ");
 	const createdAt = todo.created_at || "unknown";
 	const bodyText = todo.body?.trim() ? todo.body.trim() : "No details yet.";
 	const bodyLines = bodyText.split("\n");
@@ -1246,6 +1473,7 @@ function renderTodoDetail(theme: Theme, todo: TodoRecord, expanded: boolean): st
 		summary,
 		theme.fg("muted", `Status: ${getTodoStatus(todo)}`),
 		theme.fg("muted", `Tags: ${tags}`),
+		theme.fg("muted", `Depends: ${dependencies || "none"}`),
 		theme.fg("muted", `Created: ${createdAt}`),
 		"",
 		theme.fg("muted", "Body:"),
@@ -1430,8 +1658,9 @@ export default function todosExtension(pi: ExtensionAPI) {
 		description:
 			`Manage file-based todos in ${todosDirLabel} (list, list-all, get, create, update, append, delete, claim, release). ` +
 			"Title is the short summary; body is long-form markdown notes (update replaces, append adds). " +
+			"Todos may include post as a list of direct blockers that must be completed first (avoid transitive dependencies). " +
 			"Todo ids are shown as TODO-<hex>; id parameters accept TODO-<hex> or the raw hex filename. " +
-			"Claim tasks before working on them to avoid conflicts, and close them when complete.", 
+			"Claim tasks before working on them to avoid conflicts, and close them when complete.",
 		parameters: TodoParams,
 
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -1441,21 +1670,38 @@ export default function todosExtension(pi: ExtensionAPI) {
 			switch (action) {
 				case "list": {
 					const todos = await listTodos(todosDir);
-					const { assignedTodos, openTodos } = splitTodosByAssignment(todos);
-					const listedTodos = [...assignedTodos, ...openTodos];
+					const dependencyStatusById = Object.fromEntries(
+						todos.map((todo) => [todo.id, getTodoStatus(todo)]),
+					);
+					const listedTodos = todos.filter((todo) => !isTodoClosed(getTodoStatus(todo)));
 					const currentSessionId = ctx.sessionManager.getSessionId();
 					return {
-						content: [{ type: "text", text: serializeTodoListForAgent(listedTodos) }],
-						details: { action: "list", todos: listedTodos, currentSessionId },
+						content: [
+							{
+								type: "text",
+								text: serializeTodoListForAgent(listedTodos, dependencyStatusById),
+							},
+						],
+						details: {
+							action: "list",
+							todos: listedTodos,
+							dependencyStatusById,
+							currentSessionId,
+						},
 					};
 				}
 
 				case "list-all": {
 					const todos = await listTodos(todosDir);
+					const dependencyStatusById = Object.fromEntries(
+						todos.map((todo) => [todo.id, getTodoStatus(todo)]),
+					);
 					const currentSessionId = ctx.sessionManager.getSessionId();
 					return {
-						content: [{ type: "text", text: serializeTodoListForAgent(todos) }],
-						details: { action: "list-all", todos, currentSessionId },
+						content: [
+							{ type: "text", text: serializeTodoListForAgent(todos, dependencyStatusById) },
+						],
+						details: { action: "list-all", todos, dependencyStatusById, currentSessionId },
 					};
 				}
 
@@ -1505,6 +1751,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 						tags: params.tags ?? [],
 						status: params.status ?? "open",
 						created_at: new Date().toISOString(),
+						post: normalizeTodoPostSection(params.depends ?? [], id),
 						body: params.body ?? "",
 					};
 
@@ -1558,6 +1805,11 @@ export default function todosExtension(pi: ExtensionAPI) {
 						if (params.status !== undefined) existing.status = params.status;
 						if (params.tags !== undefined) existing.tags = params.tags;
 						if (params.body !== undefined) existing.body = params.body;
+						if (params.depends !== undefined) {
+							existing.post = normalizeTodoPostSection(params.depends, normalizedId);
+						} else {
+							existing.post = normalizeTodoPostSection(existing.post, normalizedId);
+						}
 						if (!existing.created_at) existing.created_at = new Date().toISOString();
 						clearAssignmentIfClosed(existing);
 
@@ -1740,7 +1992,13 @@ export default function todosExtension(pi: ExtensionAPI) {
 			}
 
 			if (details.action === "list" || details.action === "list-all") {
-				let text = renderTodoList(theme, details.todos, expanded, details.currentSessionId);
+				let text = renderTodoList(
+					theme,
+					details.todos,
+					expanded,
+					details.currentSessionId,
+					details.dependencyStatusById,
+				);
 				if (!expanded) {
 					const { closedTodos } = splitTodosByAssignment(details.todos);
 					if (closedTodos.length) {

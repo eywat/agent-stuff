@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Convert a URL or local file to Markdown using `uvx markitdown`.
- * Optionally summarize the produced Markdown via `pi` (claude-haiku-4-5).
+ * Optionally summarize the produced Markdown via `pi` (Gemini 3 Flash from ~/.pi/agent/models.json).
  *
  * Note: `markitdown` can fetch URLs on its own; this script mainly adds:
  *   - optional writing to a temp file / specific output path
@@ -181,8 +181,8 @@ ${body}
 --- END DOCUMENT ---`;
 
   const result = spawnSync('pi', [
-    '--provider', 'anthropic',
-    '--model', 'claude-haiku-4-5',
+    '--provider', 'ollama',
+    '--model', 'google/gemini-3-flash-preview',
     '--no-tools',
     '--no-session',
     '-p',

@@ -12,6 +12,7 @@ All skill files are in the [`skills`](skills) folder:
 * [`/update-changelog`](skills/update-changelog) - Claude Skill for updating changelogs with notable user-facing changes
 * [`/ghidra`](skills/ghidra) - Claude Skill for reverse engineering binaries using Ghidra's headless analyzer
 * [`/github`](skills/github) - Claude Skill for interacting with GitHub via the `gh` CLI (issues, PRs, runs, and APIs)
+* [`/librarian`](skills/librarian) - Claude Skill for caching and refreshing remote git repositories in `~/.cache/checkouts` for fast reuse
 * [`/openscad`](skills/openscad) - Claude Skill for creating and rendering OpenSCAD 3D models and exporting STL files
 * [`/web-browser`](skills/web-browser) - Claude Skill for using Puppeteer in a Node environment to browse the web
 * [`/tmux`](skills/tmux) - Claude Skill for driving tmux directly with keystrokes and pane output scraping
@@ -32,9 +33,10 @@ Custom extensions for the PI Coding Agent can be found in the [`pi-extensions`](
 * [`control.ts`](pi-extensions/control.ts) - Session control helpers (list controllable sessions etc.).
 * [`prompt-editor.ts`](pi-extensions/prompt-editor.ts) - In-editor prompt mode selector (default/fast/precise) with per-mode model & thinking persistence, global/project config, prompt history, and shortcuts (Ctrl+Shift+M, Ctrl+Space).
 * [`files.ts`](pi-extensions/files.ts) - Unified file browser that merges git status (dirty first) with session references, plus reveal/open/edit and diff actions.
+* [`go-to-bed.ts`](pi-extensions/go-to-bed.ts) - Late-night safety guard that encourages sleep during quiet hours (00:00-06:00 local time) and requires explicit confirmation to continue after midnight.
 * [`loop.ts`](pi-extensions/loop.ts) - Runs a prompt loop for rapid iterative coding with optional auto-continue control.
 * [`notify.ts`](pi-extensions/notify.ts) - Sends native desktop notifications when the agent finishes (OSC 777 compatible terminals).
-* [`review.ts`](pi-extensions/review.ts) - Code review command inspired by Codex. Supports reviewing uncommitted changes, against a base branch (PR style), specific commits, or with custom instructions. Includes Ctrl+R shortcut.
+* [`review.ts`](pi-extensions/review.ts) - Code review command inspired by Codex. Supports reviewing uncommitted changes, against a base branch (PR style), specific commits, or with custom instructions, plus optional loop fixing mode that iterates review→fix until blocking findings are cleared. Includes Ctrl+R shortcut.
 * [`session-breakdown.ts`](pi-extensions/session-breakdown.ts) - Interactive TUI to analyze the last 7/30/90 days of Pi session usage (sessions + cost by model) with a GitHub-style usage graph.
 * [`todos.ts`](pi-extensions/todos.ts) - Todo manager extension with file-backed storage and a TUI for listing and editing todos.
 * [`uv.ts`](pi-extensions/uv.ts) - Helpers for working with uv (Python packaging/workflows).

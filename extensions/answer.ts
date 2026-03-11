@@ -67,6 +67,7 @@ Example output:
   ]
 }`;
 
+const GITHUB_MODEL_ID = "gpt-5-mini";
 const CODEX_MODEL_ID = "gpt-5.1-codex-mini";
 const HAIKU_MODEL_ID = "claude-haiku-4-5";
 
@@ -77,6 +78,13 @@ async function selectExtractionModel(
 	currentModel: Model<Api>,
 	modelRegistry: ModelRegistry,
 ): Promise<Model<Api>> {
+	const githubModel = modelRegistry.find("github-copilot", GITHUB_MODEL_ID);
+	if (githubModel) {
+		const apiKey = await modelRegistry.getApiKey(githubModel);
+		if (apiKey) {
+			return githubModel;
+		}
+	}
 	const codexModel = modelRegistry.find("openai-codex", CODEX_MODEL_ID);
 	if (codexModel) {
 		const auth = await modelRegistry.getApiKeyAndHeaders(codexModel);

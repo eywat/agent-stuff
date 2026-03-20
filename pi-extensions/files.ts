@@ -24,6 +24,7 @@ import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import {
 	Container,
 	fuzzyFilter,
+	getKeybindings,
 	Input,
 	matchesKey,
 	type SelectItem,
@@ -159,7 +160,11 @@ const extractFileReferencesFromContent = (content: unknown): string[] => {
 
 const extractFileReferencesFromEntry = (entry: SessionEntry): string[] => {
 	if (entry.type === "message") {
-		return extractFileReferencesFromContent(entry.message.content);
+		const message = entry.message;
+		if (message && typeof message === "object" && "content" in message) {
+			return extractFileReferencesFromContent(message.content);
+		}
+		return [];
 	}
 
 	if (entry.type === "custom_message") {

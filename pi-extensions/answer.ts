@@ -67,43 +67,33 @@ Example output:
   ]
 }`;
 
-const GITHUB_MODEL_ID = "gpt-5-mini";
-const CODEX_MODEL_ID = "gpt-5.1-codex-mini";
-const HAIKU_MODEL_ID = "claude-haiku-4-5";
+const PREFERRED_EXTRACTION_MODELS = [
+	{ provider: "github-copilot", modelId: "gpt-5-mini" },
+	{ provider: "openai-codex", modelId: "gpt-5.3-codex" },
+	{ provider: "openai-codex", modelId: "gpt-5.1-codex-mini" },
+	{ provider: "anthropic", modelId: "claude-haiku-4-5" },
+] as const;
 
 /**
- * Prefer Codex mini for extraction when available, otherwise fallback to haiku or the current model.
+ * Prefer fast extraction models when available, otherwise fallback to the current model.
  */
 async function selectExtractionModel(
 	currentModel: Model<Api>,
 	modelRegistry: ModelRegistry,
 ): Promise<Model<Api>> {
-	const githubModel = modelRegistry.find("github-copilot", GITHUB_MODEL_ID);
-	if (githubModel) {
-		const apiKey = await modelRegistry.getApiKey(githubModel);
-		if (apiKey) {
-			return githubModel;
+	for (const candidate of PREFERRED_EXTRACTION_MODELS) {
+		const model = modelRegistry.find(candidate.provider, candidate.modelId);
+		if (!model) {
+			continue;
 		}
-	}
-	const codexModel = modelRegistry.find("openai-codex", CODEX_MODEL_ID);
-	if (codexModel) {
-		const auth = await modelRegistry.getApiKeyAndHeaders(codexModel);
+
+		const auth = await modelRegistry.getApiKeyAndHeaders(model);
 		if (auth.ok) {
-			return codexModel;
+			return model;
 		}
 	}
 
-	const haikuModel = modelRegistry.find("anthropic", HAIKU_MODEL_ID);
-	if (!haikuModel) {
-		return currentModel;
-	}
-
-	const auth = await modelRegistry.getApiKeyAndHeaders(haikuModel);
-	if (!auth.ok) {
-		return currentModel;
-	}
-
-	return haikuModel;
+	return currentModel;
 }
 
 /**
@@ -168,9 +158,11 @@ class QnAComponent implements Component {
 		const editorTheme: EditorTheme = {
 			borderColor: this.dim,
 			selectList: {
-				selectedBg: (s: string) => `\x1b[44m${s}\x1b[0m`,
-				matchHighlight: this.cyan,
-				itemSecondary: this.gray,
+				selectedPrefix: this.cyan,
+				selectedText: this.cyan,
+				description: this.gray,
+				scrollInfo: this.dim,
+				noMatch: this.dim,
 			},
 		};
 
@@ -414,118 +406,143 @@ class QnAComponent implements Component {
 
 export default function (pi: ExtensionAPI) {
 	const answerHandler = async (ctx: ExtensionContext) => {
-			if (!ctx.hasUI) {
-				ctx.ui.notify("answer requires interactive mode", "error");
-				return;
+		if (!ctx.hasUI) {
+			ctx.ui.notify("answer requires interactive mode", "error");
+			return;
+		}
+
+		if (!ctx.model) {
+			ctx.ui.notify("No model selected", "error");
+			return;
+		}
+
+		const branch = ctx.sessionManager.getBranch();
+		let lastAssistantText: string | undefined;
+
+		for (let i = branch.length - 1; i >= 0; i--) {
+			const entry = branch[i];
+			if (entry.type !== "message") {
+				continue;
 			}
 
-			if (!ctx.model) {
-				ctx.ui.notify("No model selected", "error");
-				return;
+			const msg = entry.message;
+			if (!("role" in msg) || msg.role !== "assistant") {
+				continue;
 			}
 
-			// Find the last assistant message on the current branch
-			const branch = ctx.sessionManager.getBranch();
-			let lastAssistantText: string | undefined;
+			if (msg.stopReason === "aborted" || msg.stopReason === "error") {
+				continue;
+			}
 
-			for (let i = branch.length - 1; i >= 0; i--) {
-				const entry = branch[i];
-				if (entry.type === "message") {
-					const msg = entry.message;
-					if ("role" in msg && msg.role === "assistant") {
-						if (msg.stopReason !== "stop") {
-							ctx.ui.notify(`Last assistant message incomplete (${msg.stopReason})`, "error");
-							return;
-						}
-						const textParts = msg.content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map((c) => c.text);
-						if (textParts.length > 0) {
-							lastAssistantText = textParts.join("\n");
-							break;
-						}
-					}
+			const textParts = msg.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text);
+			if (textParts.length > 0) {
+				lastAssistantText = textParts.join("\n");
+				break;
+			}
+		}
+
+		if (!lastAssistantText) {
+			ctx.ui.notify("No assistant messages with text found", "error");
+			return;
+		}
+
+		const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
+		let extractionError: string | undefined;
+		let extractionCancelled = false;
+
+		const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
+			const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
+			loader.onAbort = () => {
+				extractionCancelled = true;
+				done(null);
+			};
+
+			const doExtract = async () => {
+				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
+				if ("error" in auth) {
+					throw new Error(auth.error);
 				}
-			}
 
-			if (!lastAssistantText) {
-				ctx.ui.notify("No assistant messages found", "error");
-				return;
-			}
-
-			// Select the best model for extraction (prefer Codex mini, then haiku)
-			const extractionModel = await selectExtractionModel(ctx.model, ctx.modelRegistry);
-
-			// Run extraction with loader UI
-			const extractionResult = await ctx.ui.custom<ExtractionResult | null>((tui, theme, _kb, done) => {
-				const loader = new BorderedLoader(tui, theme, `Extracting questions using ${extractionModel.id}...`);
-				loader.onAbort = () => done(null);
-
-				const doExtract = async () => {
-					const auth = await ctx.modelRegistry.getApiKeyAndHeaders(extractionModel);
-					if (!auth.ok) {
-						throw new Error(auth.error);
-					}
-					const userMessage: UserMessage = {
-						role: "user",
-						content: [{ type: "text", text: lastAssistantText! }],
-						timestamp: Date.now(),
-					};
-
-					const response = await complete(
-						extractionModel,
-						{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
-						{ apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
-					);
-
-					if (response.stopReason === "aborted") {
-						return null;
-					}
-
-					const responseText = response.content
-						.filter((c): c is { type: "text"; text: string } => c.type === "text")
-						.map((c) => c.text)
-						.join("\n");
-
-					return parseExtractionResult(responseText);
+				const userMessage: UserMessage = {
+					role: "user",
+					content: [{ type: "text", text: lastAssistantText! }],
+					timestamp: Date.now(),
 				};
 
-				doExtract()
-					.then(done)
-					.catch(() => done(null));
+				const response = await complete(
+					extractionModel,
+					{ systemPrompt: SYSTEM_PROMPT, messages: [userMessage] },
+					{ apiKey: auth.apiKey, headers: auth.headers, signal: loader.signal },
+				);
 
-				return loader;
-			});
+				if (response.stopReason === "aborted") {
+					return null;
+				}
+				if (response.stopReason === "error") {
+					throw new Error(response.errorMessage || "The extraction model returned an error");
+				}
 
-			if (extractionResult === null) {
+				const responseText = response.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map((c) => c.text)
+					.join("\n");
+
+				const parsed = parseExtractionResult(responseText);
+				if (!parsed) {
+					throw new Error("The extraction model returned invalid JSON");
+				}
+				return parsed;
+			};
+
+			doExtract()
+				.then(done)
+				.catch((error) => {
+					if (loader.signal.aborted) {
+						done(null);
+						return;
+					}
+					extractionError = error instanceof Error ? error.message : String(error);
+					done(null);
+				});
+
+			return loader;
+		});
+
+		if (extractionResult === null) {
+			if (extractionCancelled) {
 				ctx.ui.notify("Cancelled", "info");
-				return;
-			}
-
-			if (extractionResult.questions.length === 0) {
-				ctx.ui.notify("No questions found in the last message", "info");
-				return;
-			}
-
-			// Show the Q&A component
-			const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
-				return new QnAComponent(extractionResult.questions, tui, done);
-			});
-
-			if (answersResult === null) {
+			} else if (extractionError) {
+				ctx.ui.notify(`Question extraction failed: ${extractionError}`, "error");
+			} else {
 				ctx.ui.notify("Cancelled", "info");
-				return;
 			}
+			return;
+		}
 
-			// Send the answers directly as a message and trigger a turn
-			pi.sendMessage(
-				{
-					customType: "answers",
-					content: "I answered your questions in the following way:\n\n" + answersResult,
-					display: true,
-				},
-				{ triggerTurn: true },
-			);
+		if (extractionResult.questions.length === 0) {
+			ctx.ui.notify("No questions found in the last message", "info");
+			return;
+		}
+
+		const answersResult = await ctx.ui.custom<string | null>((tui, _theme, _kb, done) => {
+			return new QnAComponent(extractionResult.questions, tui, done);
+		});
+
+		if (answersResult === null) {
+			ctx.ui.notify("Cancelled", "info");
+			return;
+		}
+
+		pi.sendMessage(
+			{
+				customType: "answers",
+				content: "I answered your questions in the following way:\n\n" + answersResult,
+				display: true,
+			},
+			{ triggerTurn: true },
+		);
 	};
 
 	pi.registerCommand("answer", {

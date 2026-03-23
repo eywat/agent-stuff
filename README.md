@@ -37,6 +37,7 @@ Custom extensions for Pi Coding Agent are in [`pi-extensions`](pi-extensions):
 * [`context.ts`](pi-extensions/context.ts) - Context breakdown (extensions, skills, AGENTS.md/CLAUDE.md) + token usage, including loaded-skill highlighting.
 * [`control.ts`](pi-extensions/control.ts) - Session control helpers (list controllable sessions, etc.).
 * [`files.ts`](pi-extensions/files.ts) - Unified file browser with git status + session references and reveal/open/edit/diff actions.
+* [`split-fork.ts`](pi-extensions/split-fork.ts) - `/split-fork` command to branch the current session into a new pi process in a right-hand Ghostty split.
 * [`go-to-bed.ts`](pi-extensions/go-to-bed.ts) - Late-night safety guard with explicit confirmation after midnight.
 * [`loop.ts`](pi-extensions/loop.ts) - Prompt loop for rapid iterative coding with optional auto-continue.
 * [`multi-edit.ts`](pi-extensions/multi-edit.ts) - Replaces the built-in `edit` tool with batch `multi` edits and Codex-style `patch` support, including preflight validation.

@@ -8,7 +8,7 @@
 
 import { Type } from "@sinclair/typebox";
 import { complete, type Api, type Model, type UserMessage } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext, SessionSwitchEvent } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { compact } from "@mariozechner/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@mariozechner/pi-tui";
 import { DynamicBorder } from "@mariozechner/pi-coding-agent";
@@ -209,7 +209,8 @@ export default function loopExtension(pi: ExtensionAPI): void {
 	}
 
 	function triggerLoopPrompt(ctx: ExtensionContext): void {
-		if (!loopState.active || !loopState.mode || !loopState.prompt) return;
+		const prompt = loopState.prompt;
+		if (!loopState.active || !loopState.mode || !prompt) return;
 		if (ctx.hasPendingMessages()) return;
 
 		const loopCount = (loopState.loopCount ?? 0) + 1;
@@ -217,14 +218,17 @@ export default function loopExtension(pi: ExtensionAPI): void {
 		persistState(loopState);
 		updateStatus(ctx, loopState);
 
-		pi.sendMessage({
-			customType: "loop",
-			content: loopState.prompt,
-			display: true
-		}, {
-			deliverAs: "followUp",
-			triggerTurn: true
-		});
+		pi.sendMessage(
+			{
+				customType: "loop",
+				content: prompt,
+				display: true,
+			},
+			{
+				deliverAs: "followUp",
+				triggerTurn: true,
+			},
+		);
 	}
 
 	async function showLoopSelector(ctx: ExtensionContext): Promise<LoopStateData | null> {
@@ -444,10 +448,6 @@ export default function loopExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.on("session_start", async (_event, ctx) => {
-		await restoreLoopState(ctx);
-	});
-
-	pi.on("session_switch", async (_event: SessionSwitchEvent, ctx) => {
 		await restoreLoopState(ctx);
 	});
 }

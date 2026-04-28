@@ -20,7 +20,6 @@ import { BorderedLoader } from "@mariozechner/pi-coding-agent";
 import {
 	Key,
 	matchesKey,
-	sliceByColumn,
 	type Component,
 	type TUI,
 	truncateToWidth,
@@ -959,6 +958,70 @@ function renderGraphLines(
 	}
 
 	return lines;
+}
+
+function extractAnsiCode(str: string, pos: number): { code: string; length: number } | null {
+	if (pos >= str.length || str[pos] !== "\x1b") return null;
+	const next = str[pos + 1];
+	if (next === "[") {
+		let j = pos + 2;
+		while (j < str.length && !/[mGKHJ]/.test(str[j]!)) j++;
+		return j < str.length ? { code: str.slice(pos, j + 1), length: j + 1 - pos } : null;
+	}
+	if (next === "]" || next === "_") {
+		let j = pos + 2;
+		while (j < str.length) {
+			if (str[j] === "\x07") return { code: str.slice(pos, j + 1), length: j + 1 - pos };
+			if (str[j] === "\x1b" && str[j + 1] === "\\") return { code: str.slice(pos, j + 2), length: j + 2 - pos };
+			j++;
+		}
+		return null;
+	}
+	return null;
+}
+
+function sliceByColumn(text: string, startCol: number, length: number, strict = false): string {
+	if (length <= 0) return "";
+	const endCol = startCol + length;
+	let result = "";
+	let currentCol = 0;
+	let i = 0;
+	let pendingAnsi = "";
+
+	while (i < text.length) {
+		const ansi = extractAnsiCode(text, i);
+		if (ansi) {
+			if (currentCol >= startCol && currentCol < endCol) result += ansi.code;
+			else if (currentCol < startCol) pendingAnsi += ansi.code;
+			i += ansi.length;
+			continue;
+		}
+
+		const codePoint = text.codePointAt(i);
+		if (codePoint === undefined) break;
+		const char = String.fromCodePoint(codePoint);
+		const charWidth = visibleWidth(char);
+		const nextCol = currentCol + charWidth;
+
+		if (nextCol <= startCol) {
+			currentCol = nextCol;
+			i += char.length;
+			continue;
+		}
+		if (currentCol >= endCol) {
+			break;
+		}
+		if (strict && nextCol > endCol) {
+			break;
+		}
+
+		result += pendingAnsi + char;
+		pendingAnsi = "";
+		currentCol = nextCol;
+		i += char.length;
+	}
+
+	return result;
 }
 
 function displayModelName(modelKey: string): string {

@@ -33,7 +33,16 @@
  * Use `/todos` to bring up the visual todo manager or just let the LLM use them
  * naturally.
  */
-import { DynamicBorder, copyToClipboard, getMarkdownTheme, keyHint, type ExtensionAPI, type ExtensionContext, type Theme } from "@mariozechner/pi-coding-agent";
+import {
+	DynamicBorder,
+	copyToClipboard,
+	getMarkdownTheme,
+	keyHint,
+	type ExtensionAPI,
+	type ExtensionContext,
+	type KeybindingsManager,
+	type Theme,
+} from "@mariozechner/pi-coding-agent";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { Type } from "@sinclair/typebox";
 import path from "node:path";
@@ -93,10 +102,6 @@ interface TodoSettings {
 	gc: boolean;
 	gcDays: number;
 }
-
-type KeybindingMatcher = {
-	matches: (keyData: string, keybindingId: string) => boolean;
-};
 
 const TodoParams = Type.Object({
 	action: StringEnum([
@@ -410,7 +415,7 @@ class TodoSelectorComponent extends Container implements Focusable {
 	private onCancelCallback: () => void;
 	private tui: TUI;
 	private theme: Theme;
-	private keybindings: KeybindingMatcher;
+	private keybindings: KeybindingsManager;
 	private headerText: Text;
 	private hintText: Text;
 	private currentSessionId?: string;
@@ -427,7 +432,7 @@ class TodoSelectorComponent extends Container implements Focusable {
 	constructor(
 		tui: TUI,
 		theme: Theme,
-		keybindings: KeybindingMatcher,
+		keybindings: KeybindingsManager,
 		todos: TodoFrontMatter[],
 		onSelect: (todo: TodoFrontMatter) => void,
 		onCancel: () => void,
@@ -721,12 +726,12 @@ class TodoDetailOverlayComponent {
 	private viewHeight = 0;
 	private totalLines = 0;
 	private onAction: (action: TodoOverlayAction) => void;
-	private keybindings: KeybindingMatcher;
+	private keybindings: KeybindingsManager;
 
 	constructor(
 		tui: TUI,
 		theme: Theme,
-		keybindings: KeybindingMatcher,
+		keybindings: KeybindingsManager,
 		todo: TodoRecord,
 		onAction: (action: TodoOverlayAction) => void,
 	) {
@@ -904,7 +909,7 @@ function getTodoSettingsPath(todosDir: string): string {
 
 function normalizeTodoSettings(raw: Partial<TodoSettings>): TodoSettings {
 	const gc = raw.gc ?? DEFAULT_TODO_SETTINGS.gc;
-	const gcDays = Number.isFinite(raw.gcDays) ? raw.gcDays : DEFAULT_TODO_SETTINGS.gcDays;
+	const gcDays = Number.isFinite(raw.gcDays) ? Number(raw.gcDays) : DEFAULT_TODO_SETTINGS.gcDays;
 	return {
 		gc: Boolean(gc),
 		gcDays: Math.max(0, Math.floor(gcDays)),
@@ -2070,9 +2075,7 @@ export default function todosExtension(pi: ExtensionAPI) {
 			}
 
 			let nextPrompt: string | null = null;
-			let rootTui: TUI | null = null;
 			await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
-				rootTui = tui;
 				let selector: TodoSelectorComponent | null = null;
 				let actionMenu: TodoActionMenuComponent | null = null;
 				let deleteConfirm: TodoDeleteConfirmComponent | null = null;
@@ -2332,7 +2335,6 @@ export default function todosExtension(pi: ExtensionAPI) {
 
 			if (nextPrompt) {
 				ctx.ui.setEditorText(nextPrompt);
-				rootTui?.requestRender();
 			}
 		},
 	});

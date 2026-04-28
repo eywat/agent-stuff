@@ -1,6 +1,6 @@
 import {
 	buildSessionContext,
-	codingTools,
+	convertToLlm,
 	createAgentSession,
 	createExtensionRuntime,
 	getMarkdownTheme,
@@ -34,6 +34,8 @@ const BTW_SYSTEM_PROMPT = [
 	"Help with focused questions, planning, and quick explorations.",
 	"Be direct and practical.",
 ].join(" ");
+
+const BTW_SIDE_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 const BTW_SUMMARY_PROMPT =
 	"Summarize this side conversation for handoff into the main conversation. Keep key decisions, findings, risks, and next actions. Output only the summary.";
@@ -142,7 +144,9 @@ function buildSeedMessages(ctx: ExtensionContext, thread: BtwDetails[]): Message
 	const seed: Message[] = [];
 
 	try {
-		const contextMessages = buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages;
+		const contextMessages = convertToLlm(
+			buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages,
+		);
 		seed.push(...contextMessages);
 	} catch {
 		// Ignore context seed failures and continue with an empty side thread.
@@ -241,7 +245,7 @@ class BtwOverlay extends Container implements Focusable {
 	}
 
 	handleInput(data: string): void {
-		if (this.keybindings.matches(data, "selectCancel")) {
+		if (this.keybindings.matches(data, "tui.select.cancel")) {
 			this.onDismissCallback();
 			return;
 		}
@@ -560,13 +564,13 @@ export default function (pi: ExtensionAPI) {
 			model: ctx.model,
 			modelRegistry: ctx.modelRegistry as AgentSession["modelRegistry"],
 			thinkingLevel: pi.getThinkingLevel() as SessionThinkingLevel,
-			tools: codingTools,
+			tools: BTW_SIDE_TOOL_NAMES,
 			resourceLoader: createBtwResourceLoader(ctx),
 		});
 
 		const seedMessages = buildSeedMessages(ctx, thread);
 		if (seedMessages.length > 0) {
-			session.agent.replaceMessages(seedMessages as typeof session.state.messages);
+			session.state.messages = seedMessages as typeof session.state.messages;
 		}
 
 		const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
@@ -945,10 +949,6 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
-		await restoreThread(ctx);
-	});
-
-	pi.on("session_switch", async (_event, ctx) => {
 		await restoreThread(ctx);
 	});
 

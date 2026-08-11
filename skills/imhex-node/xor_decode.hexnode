@@ -1,0 +1,41 @@
+{
+    "nodes": [
+        {
+            "type": "hex.builtin.nodes.data_access.read",
+            "id": 1,
+            "name": "hex.builtin.nodes.data_access.read.name",
+            "pos": { "x": 60.0, "y": 140.0 },
+            "attrs": [ 100 ],
+            "data": {}
+        },
+        {
+            "type": "hex.builtin.nodes.constants.int",
+            "id": 2,
+            "name": "hex.builtin.nodes.constants.int.name",
+            "pos": { "x": 60.0, "y": 300.0 },
+            "attrs": [ 200 ],
+            "data": { "value": "0x41" }
+        },
+        {
+            "type": "hex.builtin.nodes.buffer.xor",
+            "id": 3,
+            "name": "hex.builtin.nodes.buffer.xor.name",
+            "pos": { "x": 380.0, "y": 180.0 },
+            "attrs": [ 300, 301, 302 ],
+            "data": {}
+        },
+        {
+            "type": "hex.builtin.nodes.data_access.write",
+            "id": 4,
+            "name": "hex.builtin.nodes.data_access.write.name",
+            "pos": { "x": 700.0, "y": 180.0 },
+            "attrs": [ 400 ],
+            "data": {}
+        }
+    ],
+    "links": [
+        { "id": 500, "from": 100, "to": 300 },
+        { "id": 501, "from": 200, "to": 301 },
+        { "id": 502, "from": 302, "to": 400 }
+    ]
+}

@@ -10,9 +10,9 @@
  * 4. Submits the compiled answers when done
  */
 
-import { complete, parseJsonWithRepair, type Model, type Api, type UserMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
-import { BorderedLoader } from "@earendil-works/pi-coding-agent";
+import { complete, parseJsonWithRepair, type Model, type Api, type UserMessage } from "@mariozechner/pi-ai";
+import type { ExtensionAPI, ExtensionContext, ModelRegistry } from "@mariozechner/pi-coding-agent";
+import { BorderedLoader } from "@mariozechner/pi-coding-agent";
 import {
 	type Component,
 	Editor,
@@ -23,7 +23,7 @@ import {
 	type TUI,
 	visibleWidth,
 	wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+} from "@mariozechner/pi-tui";
 
 // Structured output format for question extraction
 interface ExtractedQuestion {
@@ -72,38 +72,34 @@ Example output:
   ]
 }`;
 
-const CODEX_MODEL_IDS = ["gpt-5.4-mini", "gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.3-codex"];
-const HAIKU_MODEL_ID = "claude-haiku-4-5";
+const PREFERRED_EXTRACTION_MODELS = [
+	{ provider: "github-copilot", modelId: "gpt-5-mini" },
+	{ provider: "github-copilot", modelId: "gpt-5-mini" },
+	{ provider: "openai-codex", modelId: "gpt-5.3-codex" },
+	{ provider: "openai-codex", modelId: "gpt-5.1-codex-mini" },
+	{ provider: "anthropic", modelId: "claude-haiku-4-5" },
+] as const;
 
 /**
- * Prefer a fast configured Codex model for extraction, then haiku, then the
- * current model.
+ * Prefer configured local extraction models, falling back to the current model.
  */
 async function selectExtractionModel(
 	currentModel: Model<Api>,
 	modelRegistry: ModelRegistry,
 ): Promise<Model<Api>> {
-	for (const modelId of CODEX_MODEL_IDS) {
-		const codexModel = modelRegistry.find("openai-codex", modelId);
-		if (codexModel) {
-			const auth = await modelRegistry.getApiKeyAndHeaders(codexModel);
-			if (auth.ok) {
-				return codexModel;
-			}
+	for (const candidate of PREFERRED_EXTRACTION_MODELS) {
+		const model = modelRegistry.find(candidate.provider, candidate.modelId);
+		if (!model) {
+			continue;
+		}
+
+		const auth = await modelRegistry.getApiKeyAndHeaders(model);
+		if (auth.ok) {
+			return model;
 		}
 	}
 
-	const haikuModel = modelRegistry.find("anthropic", HAIKU_MODEL_ID);
-	if (!haikuModel) {
-		return currentModel;
-	}
-
-	const auth = await modelRegistry.getApiKeyAndHeaders(haikuModel);
-	if (auth.ok === false) {
-		return currentModel;
-	}
-
-	return haikuModel;
+	return currentModel;
 }
 
 function toExtractedQuestion(value: unknown): ExtractedQuestion | null {

@@ -19,11 +19,12 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, SessionEntry } from "@mariozechner/pi-coding-agent";
+import { DynamicBorder } from "@mariozechner/pi-coding-agent";
 import {
 	Container,
 	fuzzyFilter,
+	getKeybindings,
 	Input,
 	matchesKey,
 	type SelectItem,
@@ -31,7 +32,7 @@ import {
 	Spacer,
 	Text,
 	type TUI,
-} from "@earendil-works/pi-tui";
+} from "@mariozechner/pi-tui";
 
 type ContentBlock = {
 	type?: string;
@@ -159,7 +160,11 @@ const extractFileReferencesFromContent = (content: unknown): string[] => {
 
 const extractFileReferencesFromEntry = (entry: SessionEntry): string[] => {
 	if (entry.type === "message") {
-		return "content" in entry.message ? extractFileReferencesFromContent(entry.message.content) : [];
+		const message = entry.message;
+		if (message && typeof message === "object" && "content" in message) {
+			return extractFileReferencesFromContent(message.content);
+		}
+		return [];
 	}
 
 	if (entry.type === "custom_message") {

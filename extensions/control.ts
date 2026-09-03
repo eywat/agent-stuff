@@ -48,12 +48,12 @@ import type {
 	TurnEndEvent,
 	MessageRenderer,
 	ModelRegistry,
-} from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { complete, type Model, type Api, type UserMessage, type TextContent } from "@earendil-works/pi-ai";
-import { StringEnum } from "@earendil-works/pi-ai";
-import { Box, Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+} from "@mariozechner/pi-coding-agent";
+import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import { complete, type Model, type Api, type UserMessage, type TextContent } from "@mariozechner/pi-ai";
+import { StringEnum } from "@mariozechner/pi-ai";
+import { Box, Container, Markdown, Spacer, Text } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 import { promises as fs } from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -439,14 +439,11 @@ function getLastAssistantMessage(ctx: ExtensionContext): ExtractedMessage | unde
 		if (entry.type === "message") {
 			const msg = entry.message;
 			if ("role" in msg && msg.role === "assistant") {
-				const content = Array.isArray(msg.content) ? msg.content : [{ type: "text", text: msg.content }];
-				const textParts = content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text);
-				if (textParts.length > 0) {
+				const content = extractTextContent(msg.content);
+				if (content) {
 					return {
 						role: "assistant",
-						content: textParts.join("\n"),
+						content,
 						timestamp: msg.timestamp,
 					};
 				}
@@ -476,14 +473,11 @@ function getMessagesSinceLastPrompt(ctx: ExtensionContext): ExtractedMessage[] {
 		if (entry.type === "message") {
 			const msg = entry.message;
 			if ("role" in msg && (msg.role === "user" || msg.role === "assistant")) {
-				const content = Array.isArray(msg.content) ? msg.content : [{ type: "text", text: msg.content }];
-				const textParts = content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text);
-				if (textParts.length > 0) {
+				const content = extractTextContent(msg.content);
+				if (content) {
 					messages.push({
 						role: msg.role,
-						content: textParts.join("\n"),
+						content,
 						timestamp: msg.timestamp,
 					});
 				}
@@ -501,11 +495,14 @@ function getFirstEntryId(ctx: ExtensionContext): string | undefined {
 	return root?.id ?? entries[0]?.id;
 }
 
-function extractTextContent(content: string | Array<TextContent | { type: string }>): string {
+function extractTextContent(content: unknown): string {
 	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
 	return content
-		.filter((c): c is TextContent => c.type === "text")
-		.map((c) => c.text)
+		.filter((item): item is TextContent => {
+			return !!item && typeof item === "object" && (item as { type?: unknown }).type === "text";
+		})
+		.map((item) => item.text)
 		.join("\n");
 }
 
@@ -663,7 +660,7 @@ async function handleCommand(
 		}
 
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (auth.ok === false) {
+		if (!auth.ok) {
 			respond(false, "get_summary", undefined, auth.error);
 			return;
 		}
@@ -769,8 +766,8 @@ async function handleCommand(
 		return;
 	}
 
-	const unsupportedType = (command as { type: string }).type;
-	respond(false, unsupportedType, undefined, `Unsupported command: ${unsupportedType}`);
+	const commandType = (command as { type: string }).type;
+	respond(false, commandType, undefined, `Unsupported command: ${commandType}`);
 }
 
 // ============================================================================
@@ -874,12 +871,13 @@ async function sendRpcCommand(
 					// Handle response
 					if (msg.type === "response") {
 						if (msg.command === command.type) {
-							response = msg;
+							const finalResponse = msg as RpcResponse;
+							response = finalResponse;
 							// If not waiting for event, we're done
 							if (!waitForEvent) {
 								cleanup();
 								socket.end();
-								resolve({ response });
+								resolve({ response: finalResponse });
 								return;
 							}
 						}
@@ -1403,13 +1401,16 @@ Messages automatically include sender session info for replies. When you want a 
 			return new Text(header, 0, 0);
 		},
 
-		renderResult(result, { expanded }, theme) {
+		renderResult(result, { expanded }, theme, context) {
 			const details = result.details as Record<string, unknown> | undefined;
 			const isError = (result as { isError?: boolean }).isError === true;
 
 			// Error case
 			if (isError || details?.error) {
-				const errorMsg = (details?.error as string) || result.content[0]?.type === "text" ? (result.content[0] as { type: "text"; text: string }).text : "Unknown error";
+				const firstText = result.content.find(
+					(item): item is { type: "text"; text: string } => item.type === "text",
+				)?.text;
+				const errorMsg = (details?.error as string | undefined) ?? firstText ?? "Unknown error";
 				return new Text(theme.fg("error", "✗ ") + theme.fg("error", errorMsg), 0, 0);
 			}
 

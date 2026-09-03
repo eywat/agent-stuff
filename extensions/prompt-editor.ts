@@ -1,5 +1,5 @@
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { CustomEditor, ModelSelectorComponent, SettingsManager } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { CustomEditor, ModelSelectorComponent, SettingsManager } from "@mariozechner/pi-coding-agent";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs/promises";
@@ -9,8 +9,8 @@ import type { Dirent } from "node:fs";
 // Modes
 // =============================================================================
 
-type ModeName = string;
 type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type ModeName = string;
 
 type ModeSpec = {
 	provider?: string;
@@ -232,7 +232,7 @@ function applyModesPatch(target: ModesFile, patch: ModesPatch): void {
 			continue;
 		}
 
-		const targetSpec: Record<string, unknown> = (target.modes[mode] ??= {}) as Record<string, unknown>;
+		const targetSpec: Record<string, unknown> = ((target.modes[mode] ??= {}) as any) ?? {};
 		for (const [k, v] of Object.entries(specPatch)) {
 			if (v === null || v === undefined) {
 				delete targetSpec[k];
@@ -986,18 +986,7 @@ class PromptEditor extends CustomEditor {
 		const scrollPrefixMatch = topPlain.match(/^(─── ↑ \d+ more )/);
 		const prefix = scrollPrefixMatch?.[1] ?? "──";
 
-		const labelColor = this.modeLabelColor ?? ((text: string) => this.borderColor(text));
-		const isBashMode = this.getText().trimStart().startsWith("!");
-		const labelParts: Array<{ text: string; color: (text: string) => string }> = [
-			{ text: formatModeLabel(mode), color: labelColor },
-		];
-		if (isBashMode) {
-			labelParts.push(
-				{ text: " ", color: labelColor },
-				{ text: "──", color: (text: string) => this.borderColor(text) },
-				{ text: " bash", color: labelColor },
-			);
-		}
+		let label = formatModeLabel(mode);
 
 		// Compute how much room we have for the label core (without truncating the prefix).
 		const labelLeftSpace = prefix.endsWith(" ") ? "" : " ";
@@ -1005,37 +994,17 @@ class PromptEditor extends CustomEditor {
 		const minRightBorder = 1; // keep at least one border cell on the right
 		const maxLabelLen = Math.max(0, width - prefix.length - labelLeftSpace.length - labelRightSpace.length - minRightBorder);
 		if (maxLabelLen <= 0) return lines;
+		if (label.length > maxLabelLen) label = label.slice(0, maxLabelLen);
 
-		let labelLen = labelParts.reduce((sum, part) => sum + part.text.length, 0);
-		if (labelLen > maxLabelLen) {
-			let remainingLen = maxLabelLen;
-			for (const part of labelParts) {
-				if (remainingLen <= 0) {
-					part.text = "";
-					continue;
-				}
-				if (part.text.length > remainingLen) {
-					part.text = part.text.slice(0, remainingLen);
-					remainingLen = 0;
-				} else {
-					remainingLen -= part.text.length;
-				}
-			}
-			labelLen = maxLabelLen;
-		}
+		const labelChunk = `${labelLeftSpace}${label}${labelRightSpace}`;
 
-		const labelChunkLen = labelLeftSpace.length + labelLen + labelRightSpace.length;
-		const remaining = width - prefix.length - labelChunkLen;
+		const remaining = width - prefix.length - labelChunk.length;
 		if (remaining < 0) return lines;
 
 		const right = "─".repeat(Math.max(0, remaining));
-		const coloredLabel = labelParts.map((part) => (part.text ? part.color(part.text) : "")).join("");
-		lines[0] =
-			this.borderColor(prefix) +
-			(labelLeftSpace ? labelColor(labelLeftSpace) : "") +
-			coloredLabel +
-			(labelRightSpace ? labelColor(labelRightSpace) : "") +
-			this.borderColor(right);
+
+		const labelColor = this.modeLabelColor ?? ((text: string) => this.borderColor(text));
+		lines[0] = this.borderColor(prefix) + labelColor(labelChunk) + this.borderColor(right);
 		return lines;
 	}
 
@@ -1258,7 +1227,7 @@ export default function (pi: ExtensionAPI) {
 			if (tokens[0] === "store") {
 				await ensureRuntime(pi, ctx);
 
-				let target = tokens[1];
+				let target: string | undefined = tokens[1];
 				if (!target) {
 					if (!ctx.hasUI) return;
 					const names = orderedModeNames(runtime.data.modes);

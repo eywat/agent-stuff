@@ -1,5 +1,6 @@
 import {
 	buildSessionContext,
+	convertToLlm,
 	createAgentSession,
 	createExtensionRuntime,
 	getMarkdownTheme,
@@ -10,8 +11,8 @@ import {
 	type ExtensionCommandContext,
 	type ExtensionContext,
 	type ResourceLoader,
-} from "@earendil-works/pi-coding-agent";
-import { type AssistantMessage, type Message, type ThinkingLevel as AiThinkingLevel } from "@earendil-works/pi-ai";
+} from "@mariozechner/pi-coding-agent";
+import { type AssistantMessage, type Message, type ThinkingLevel as AiThinkingLevel } from "@mariozechner/pi-ai";
 import {
 	Container,
 	Input,
@@ -22,7 +23,7 @@ import {
 	type KeybindingsManager,
 	type OverlayHandle,
 	type TUI,
-} from "@earendil-works/pi-tui";
+} from "@mariozechner/pi-tui";
 
 const BTW_ENTRY_TYPE = "btw-thread-entry";
 const BTW_RESET_TYPE = "btw-thread-reset";
@@ -33,6 +34,8 @@ const BTW_SYSTEM_PROMPT = [
 	"Help with focused questions, planning, and quick explorations.",
 	"Be direct and practical.",
 ].join(" ");
+
+const BTW_SIDE_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
 
 const BTW_SUMMARY_PROMPT =
 	"Summarize this side conversation for handoff into the main conversation. Keep key decisions, findings, risks, and next actions. Output only the summary.";
@@ -141,8 +144,10 @@ function buildSeedMessages(ctx: ExtensionContext, thread: BtwDetails[]): Message
 	const seed: Message[] = [];
 
 	try {
-		const contextMessages = buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages;
-		seed.push(...(contextMessages.filter((message) => "role" in message) as Message[]));
+		const contextMessages = convertToLlm(
+			buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId()).messages,
+		);
+		seed.push(...contextMessages);
 	} catch {
 		// Ignore context seed failures and continue with an empty side thread.
 	}
@@ -559,13 +564,13 @@ export default function (pi: ExtensionAPI) {
 			model: ctx.model,
 			modelRegistry: ctx.modelRegistry as AgentSession["modelRegistry"],
 			thinkingLevel: pi.getThinkingLevel() as SessionThinkingLevel,
-			tools: ["read", "bash", "edit", "write"],
+			tools: BTW_SIDE_TOOL_NAMES,
 			resourceLoader: createBtwResourceLoader(ctx),
 		});
 
 		const seedMessages = buildSeedMessages(ctx, thread);
 		if (seedMessages.length > 0) {
-			session.agent.state.messages = seedMessages as typeof session.agent.state.messages;
+			session.state.messages = seedMessages as typeof session.state.messages;
 		}
 
 		const unsubscribe = session.subscribe((event: AgentSessionEvent) => {
@@ -739,7 +744,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (auth.ok === false) {
+		if (!auth.ok) {
 			throw new Error(auth.error);
 		}
 
@@ -824,7 +829,7 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (auth.ok === false) {
+		if (!auth.ok) {
 			const message = auth.error;
 			setOverlayStatus(message);
 			notify(ctx, message, "error");

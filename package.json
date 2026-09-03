@@ -16,7 +16,7 @@
   ],
   "pi": {
     "extensions": [
-      "./extensions/*.ts"
+      "./extensions"
     ],
     "skills": [
       "./skills"
@@ -29,12 +29,11 @@
     ]
   },
   "dependencies": {
-    "diff": "^8.0.2"
+    "diff": "^8.0.3"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-tui": "*",
-    "typebox": "*"
+    "@mariozechner/pi-ai": "^0.68.0",
+    "@mariozechner/pi-coding-agent": "^0.68.0",
+    "@mariozechner/pi-tui": "^0.68.0"
   }
 }
